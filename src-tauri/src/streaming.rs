@@ -135,9 +135,13 @@ pub fn spawn(
 
             // Run whisper on the snapshot. Reuses the persistent context from
             // §3.1 so this is a state-only allocation, not a model reload.
+            // Override beam_size back to 1 — per-tick streaming inference
+            // can't afford the 2–3× decode multiplier from beam search.
+            // Final transcription (recorder.rs) keeps the default beam=5.
             let opts = TranscribeOptions {
                 language: config.language.clone(),
                 initial_prompt: config.initial_prompt.clone(),
+                beam_size: 1,
                 ..TranscribeOptions::default()
             };
             let model_path = config.model_path.clone();

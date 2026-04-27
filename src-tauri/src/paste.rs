@@ -1,8 +1,12 @@
 pub fn paste_text(text: &str) -> Result<(), String> {
-    // Set clipboard (arboard is thread-safe). arboard returns after the clipboard
-    // is set, so no sleep is needed before synthesising the paste keystroke.
+    // Snapshot the user's existing clipboard before we clobber it with the
+    // dictated text. After the synthesised paste keystroke fires (and the OS
+    // has consumed the clipboard), a background thread restores the prior
+    // contents so dictation doesn't trample whatever the user had copied.
     let mut clipboard = arboard::Clipboard::new().map_err(|e| e.to_string())?;
+    let prior_clipboard = clipboard.get_text().ok();
     clipboard.set_text(text).map_err(|e| e.to_string())?;
+    drop(clipboard);
 
     #[cfg(target_os = "macos")]
     {
@@ -23,6 +27,25 @@ pub fn paste_text(text: &str) -> Result<(), String> {
             .key(Key::Control, Direction::Release)
             .map_err(|e| e.to_string())?;
     }
+
+    // Restore the user's prior clipboard once the OS has had time to consume
+    // the synthesised paste. 120 ms is conservative — works on slow apps
+    // (Slack, Teams electrons) without the user noticing, and the recorder
+    // doesn't wait on it. If `prior_clipboard` was empty, we clear instead of
+    // leaving the dictated text lingering.
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(120));
+        if let Ok(mut cb) = arboard::Clipboard::new() {
+            match prior_clipboard {
+                Some(p) => {
+                    let _ = cb.set_text(p);
+                }
+                None => {
+                    let _ = cb.clear();
+                }
+            }
+        }
+    });
 
     Ok(())
 }

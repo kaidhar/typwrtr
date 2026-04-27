@@ -45,6 +45,12 @@ pub struct Settings {
     /// `"off"` (default) or `"groq"`. Local llama.cpp sidecar is deferred.
     #[serde(rename = "llmCleanup", default = "default_llm_cleanup")]
     pub llm_cleanup: String,
+    /// Quality preset for the cleanup pass: `"fast"` (Llama 3.1 8B-instant,
+    /// ~150–400 ms RTT) or `"quality"` (Llama 3.3 70B-versatile, ~400–700 ms,
+    /// noticeably better restoration). Default `"quality"` — still inside the
+    /// 800 ms timeout budget on Groq's typical infra.
+    #[serde(rename = "llmCleanupModel", default = "default_llm_cleanup_model")]
+    pub llm_cleanup_model: String,
     /// Phase-5 §5.1/5.2: when true, run partial whisper inferences during
     /// recording and surface them in the captions overlay. Off by default —
     /// streaming costs extra inference cycles per second.
@@ -59,6 +65,10 @@ pub struct Settings {
 
 fn default_llm_cleanup() -> String {
     "off".to_string()
+}
+
+fn default_llm_cleanup_model() -> String {
+    "quality".to_string()
 }
 
 fn default_vad_silence_ms() -> u32 {
@@ -81,6 +91,7 @@ impl Default for Settings {
             keep_audio_clips: false,
             fixup_hotkey: "CmdOrCtrl+Shift+Semicolon".to_string(),
             llm_cleanup: "off".to_string(),
+            llm_cleanup_model: "quality".to_string(),
             streaming_captions: false,
             vad_silence_ms: 800,
         }
@@ -191,6 +202,7 @@ mod tests {
         assert!(!settings.keep_audio_clips);
         assert_eq!(settings.fixup_hotkey, "CmdOrCtrl+Shift+Semicolon");
         assert_eq!(settings.llm_cleanup, "off");
+        assert_eq!(settings.llm_cleanup_model, "quality");
         assert!(!settings.streaming_captions);
         assert_eq!(settings.vad_silence_ms, 800);
     }

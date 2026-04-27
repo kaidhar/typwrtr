@@ -127,6 +127,7 @@ const MIGRATIONS: &[(i32, &str)] = &[
     (3, MIGRATION_3),
     (4, MIGRATION_4),
     (5, MIGRATION_5),
+    (6, MIGRATION_6),
 ];
 
 const MIGRATION_1: &str = r#"
@@ -242,6 +243,16 @@ const MIGRATION_5: &str = r#"
 ALTER TABLE corrections ADD COLUMN source TEXT NOT NULL DEFAULT 'manual';
 "#;
 
+/// Migration 6 — phonetic replacement.
+///
+/// Adds `app_profiles.phonetic_match`. When on (default), the recorder layers
+/// a Metaphone-based fuzzy pass after the exact-match replacement, so a single
+/// learned correction (e.g. `Bahb → Bob`) covers homophone variants
+/// (`Baab`, `Bawb`, `Bohb` all encode the same Metaphone key).
+const MIGRATION_6: &str = r#"
+ALTER TABLE app_profiles ADD COLUMN phonetic_match INTEGER NOT NULL DEFAULT 1;
+"#;
+
 /// Allowed values for `app_profiles.postprocess_mode`. Validated server-side
 /// before any upsert so a malformed UI payload can't poison the table.
 pub const POSTPROCESS_MODES: &[&str] = &["default", "markdown", "plain", "code"];
@@ -311,6 +322,12 @@ pub struct AppProfileRow {
     /// learned corrections into transcribed text before pasting.
     #[serde(default = "default_true")]
     pub auto_apply_replacements: bool,
+    /// When true (default), phonetic-key fuzzy matching layers on top of the
+    /// exact-match replacement table — one `Bahb → Bob` correction covers
+    /// `Baab`, `Bawb`, `Bohb`. Off for apps where homophone collisions matter
+    /// (legal names, scientific nomenclature, etc.).
+    #[serde(default = "default_true")]
+    pub phonetic_match: bool,
     /// Code identifier convention used by the `code` postprocess mode.
     /// One of `snake`, `camel`, `kebab`. Defaults to `snake`.
     #[serde(default = "default_code_case")]
@@ -376,6 +393,7 @@ impl Db {
                 p.preferred_model,
                 COALESCE(p.enabled, 1) AS enabled,
                 COALESCE(p.auto_apply_replacements, 1) AS auto_apply_replacements,
+                COALESCE(p.phonetic_match, 1) AS phonetic_match,
                 COALESCE(p.code_case, 'snake') AS code_case,
                 (SELECT MAX(created_at) FROM transcriptions WHERE app_bundle_id = a.bundle_id) AS last_used_at,
                 (SELECT COUNT(*)        FROM transcriptions WHERE app_bundle_id = a.bundle_id) AS use_count,
@@ -396,10 +414,11 @@ impl Db {
                     preferred_model: row.get(4)?,
                     enabled: row.get::<_, i64>(5)? != 0,
                     auto_apply_replacements: row.get::<_, i64>(6)? != 0,
-                    code_case: row.get(7)?,
-                    last_used_at: row.get(8)?,
-                    use_count: row.get(9)?,
-                    is_persisted: row.get::<_, i64>(10)? != 0,
+                    phonetic_match: row.get::<_, i64>(7)? != 0,
+                    code_case: row.get(8)?,
+                    last_used_at: row.get(9)?,
+                    use_count: row.get(10)?,
+                    is_persisted: row.get::<_, i64>(11)? != 0,
                 })
             })
             .map_err(|e| e.to_string())?;
@@ -435,8 +454,8 @@ impl Db {
         conn.execute(
             "INSERT INTO app_profiles
                  (bundle_id, display_name, prompt_template, postprocess_mode,
-                  preferred_model, enabled, auto_apply_replacements, code_case)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+                  preferred_model, enabled, auto_apply_replacements, phonetic_match, code_case)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
              ON CONFLICT(bundle_id) DO UPDATE SET
                  display_name = excluded.display_name,
                  prompt_template = excluded.prompt_template,
@@ -444,6 +463,7 @@ impl Db {
                  preferred_model = excluded.preferred_model,
                  enabled = excluded.enabled,
                  auto_apply_replacements = excluded.auto_apply_replacements,
+                 phonetic_match = excluded.phonetic_match,
                  code_case = excluded.code_case",
             params![
                 p.bundle_id,
@@ -453,6 +473,7 @@ impl Db {
                 p.preferred_model,
                 if p.enabled { 1 } else { 0 },
                 if p.auto_apply_replacements { 1 } else { 0 },
+                if p.phonetic_match { 1 } else { 0 },
                 p.code_case,
             ],
         )
@@ -479,7 +500,7 @@ impl Db {
         let sql = r#"
             SELECT bundle_id, display_name, prompt_template,
                    postprocess_mode, preferred_model, enabled,
-                   auto_apply_replacements, code_case
+                   auto_apply_replacements, phonetic_match, code_case
             FROM app_profiles WHERE bundle_id = ?1
         "#;
         let mut stmt = conn.prepare(sql).map_err(|e| e.to_string())?;
@@ -493,7 +514,8 @@ impl Db {
                     preferred_model: row.get(4)?,
                     enabled: row.get::<_, i64>(5)? != 0,
                     auto_apply_replacements: row.get::<_, i64>(6)? != 0,
-                    code_case: row.get(7)?,
+                    phonetic_match: row.get::<_, i64>(7)? != 0,
+                    code_case: row.get(8)?,
                     last_used_at: None,
                     use_count: 0,
                     is_persisted: true,
@@ -1121,6 +1143,7 @@ mod tests {
             preferred_model: Some("medium.en".into()),
             enabled: true,
             auto_apply_replacements: true,
+            phonetic_match: true,
             code_case: "snake".into(),
             last_used_at: None,
             use_count: 0,
@@ -1148,6 +1171,7 @@ mod tests {
             preferred_model: None,
             enabled: true,
             auto_apply_replacements: true,
+            phonetic_match: true,
             code_case: "snake".into(),
             last_used_at: None,
             use_count: 0,
@@ -1183,6 +1207,7 @@ mod tests {
             preferred_model: None,
             enabled: true,
             auto_apply_replacements: true,
+            phonetic_match: true,
             code_case: "snake".into(),
             last_used_at: None,
             use_count: 0,
@@ -1226,6 +1251,7 @@ mod tests {
             preferred_model: None,
             enabled: false,
             auto_apply_replacements: true,
+            phonetic_match: true,
             code_case: "snake".into(),
             last_used_at: None,
             use_count: 0,

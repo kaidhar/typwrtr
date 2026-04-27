@@ -32,6 +32,7 @@ active-win-pos-rs = "0.9"
 similar = "2"
 rubato = "0.15"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
+rphonetic = "3"
 
 # whisper-rs is split per-target so each OS picks the right GPU backend by
 # default: Metal on macOS, CUDA on Windows/Linux. The CUDA build requires the

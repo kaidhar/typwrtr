@@ -10,7 +10,7 @@ use crate::context;
 use crate::db::{Db, NewTranscription};
 use crate::focused_text;
 use crate::learning::{apply_correction_pairs, similar_ratio};
-use crate::llm_cleanup::{cleanup as llm_cleanup, CleanupBackend};
+use crate::llm_cleanup::{cleanup as llm_cleanup, CleanupBackend, CleanupModel};
 use crate::paste::paste_text;
 use crate::postprocess::{self, CodeCase, Mode};
 use crate::settings::Settings;
@@ -239,11 +239,14 @@ impl Recorder {
 
         // Phase 2 §2.4 replacement table — apply learned (wrong → right) pairs
         // with `count >= 3`, scoped to this app, when the profile permits it.
+        // Phonetic pass (post-exact) catches homophone variants so one
+        // `Bahb → Bob` correction also covers `Baab`, `Bawb`, `Bohb` etc.
         let auto_apply = profile.map(|p| p.auto_apply_replacements).unwrap_or(true);
+        let phonetic_on = profile.map(|p| p.phonetic_match).unwrap_or(true);
         if auto_apply && !cleaned.is_empty() {
             if let Some(bundle) = ctx.as_ref().map(|c| c.bundle_id.as_str()) {
                 if let Ok(rows) = self.db.top_corrections_for_app(bundle, 200) {
-                    cleaned = apply_replacements(&cleaned, &rows);
+                    cleaned = apply_replacements(&cleaned, &rows, phonetic_on);
                 }
             }
         }
@@ -308,11 +311,13 @@ impl Recorder {
         // Phase 4.2 optional LLM cleanup — final pass, time-budgeted.
         let backend = CleanupBackend::from_str(&settings.llm_cleanup);
         if backend != CleanupBackend::Off && !cleaned.is_empty() {
+            let model = CleanupModel::from_str(&settings.llm_cleanup_model);
             cleaned = llm_cleanup(
                 backend,
                 &settings.groq_api_key,
                 &cleaned,
                 Duration::from_millis(800),
+                model,
             )
             .await;
         }
@@ -856,36 +861,140 @@ fn budgeted_join(base: &str, extras: &[String], budget: usize) -> String {
     out
 }
 
-/// Apply learned corrections to a transcript. We only consider rows with
-/// `count >= 3` (the plan's threshold) and substitute case-insensitively in
-/// whole-word position. The `context` field is *advisory*; if it exists we
-/// require *some* token from it to also appear in the surrounding text — that
-/// guards against blindly replacing a homophone that happens to match.
-fn apply_replacements(text: &str, rows: &[crate::db::CorrectionRow]) -> String {
+/// Apply learned corrections to a transcript. Two-pass:
+///
+/// 1. **Exact-match pass.** Rows with `count >= 3` substitute their `wrong`
+///    string case-insensitively at whole-word boundaries. The `context` field
+///    is advisory: when present, at least one non-stopword 4+-char token from
+///    it must also appear in the surrounding text, guarding against blind
+///    homophone clobbers.
+/// 2. **Phonetic pass** (when `phonetic_match` is on). Single-token `wrong`
+///    rows are keyed by their Metaphone encoding; words in the transcript
+///    that share a key are replaced. This covers homophone variants like
+///    `Bahb` / `Baab` / `Bawb` from a single learned `Bahb → Bob` correction.
+///    Words equal to a row's `right` (case-insensitive) are skipped to avoid
+///    re-replacing already-corrected text.
+fn apply_replacements(
+    text: &str,
+    rows: &[crate::db::CorrectionRow],
+    phonetic_match: bool,
+) -> String {
     let mut out = text.to_string();
     for r in rows {
         if r.count < 3 || r.wrong.is_empty() || r.right.is_empty() {
             continue;
         }
-        let context_ok = match r.context.as_deref() {
-            Some(ctx) if !ctx.trim().is_empty() => {
-                let hay_lower = out.to_lowercase();
-                ctx.split_whitespace()
-                    .map(|w| w.trim_matches(|c: char| c.is_ascii_punctuation()))
-                    .filter(|w| {
-                        w.len() >= 4
-                            && !crate::learning::diff::STOPWORDS
-                                .iter()
-                                .any(|sw| sw.eq_ignore_ascii_case(w))
-                    })
-                    .any(|w| hay_lower.contains(&w.to_lowercase()))
-            }
-            _ => true,
-        };
-        if !context_ok {
+        if !context_ok_for_row(&out, r) {
             continue;
         }
         out = case_insensitive_word_replace(&out, &r.wrong, &r.right);
+    }
+
+    if phonetic_match {
+        out = apply_phonetic_pass(&out, rows);
+    }
+
+    out
+}
+
+fn context_ok_for_row(haystack: &str, r: &crate::db::CorrectionRow) -> bool {
+    match r.context.as_deref() {
+        Some(ctx) if !ctx.trim().is_empty() => {
+            let hay_lower = haystack.to_lowercase();
+            ctx.split_whitespace()
+                .map(|w| w.trim_matches(|c: char| c.is_ascii_punctuation()))
+                .filter(|w| {
+                    w.len() >= 4
+                        && !crate::learning::diff::STOPWORDS
+                            .iter()
+                            .any(|sw| sw.eq_ignore_ascii_case(w))
+                })
+                .any(|w| hay_lower.contains(&w.to_lowercase()))
+        }
+        _ => true,
+    }
+}
+
+/// Walk `text` word-by-word; for each word, look up rows whose `wrong` field
+/// shares its Metaphone key. Multi-word `wrong` values are skipped (phonetic
+/// matching is per-token). Words equal to a candidate's `right` (case-
+/// insensitively) are left alone — that prevents re-replacing text already
+/// fixed by the exact pass.
+fn apply_phonetic_pass(text: &str, rows: &[crate::db::CorrectionRow]) -> String {
+    use rphonetic::{Encoder, Metaphone};
+    use std::collections::HashMap;
+
+    let metaphone = Metaphone::default();
+    let key_of = |word: &str| -> Option<String> {
+        let trimmed = word.trim_matches(|c: char| !c.is_alphanumeric());
+        if trimmed.len() < 2 {
+            return None;
+        }
+        let key = metaphone.encode(trimmed);
+        if key.is_empty() {
+            None
+        } else {
+            Some(key)
+        }
+    };
+
+    // Build phonetic key → candidate rows. Skip multi-token wrongs and rows
+    // below count threshold up-front.
+    let mut by_key: HashMap<String, Vec<&crate::db::CorrectionRow>> = HashMap::new();
+    for r in rows {
+        if r.count < 3 || r.wrong.is_empty() || r.right.is_empty() {
+            continue;
+        }
+        if r.wrong.split_whitespace().count() != 1 {
+            continue;
+        }
+        if let Some(k) = key_of(&r.wrong) {
+            by_key.entry(k).or_default().push(r);
+        }
+    }
+    if by_key.is_empty() {
+        return text.to_string();
+    }
+
+    // Walk the text in (non-word | word) chunks so we preserve all whitespace
+    // and punctuation verbatim around the words we substitute.
+    let mut out = String::with_capacity(text.len());
+    let chars: Vec<char> = text.chars().collect();
+    let mut i = 0usize;
+    while i < chars.len() {
+        let nonword_start = i;
+        while i < chars.len() && !chars[i].is_alphanumeric() {
+            i += 1;
+        }
+        out.extend(&chars[nonword_start..i]);
+        if i >= chars.len() {
+            break;
+        }
+
+        let word_start = i;
+        while i < chars.len() && (chars[i].is_alphanumeric() || chars[i] == '\'') {
+            i += 1;
+        }
+        let word: String = chars[word_start..i].iter().collect();
+
+        let replacement = key_of(&word).and_then(|k| {
+            by_key.get(&k).and_then(|candidates| {
+                // Skip if word already matches a candidate's `right` — this
+                // is the just-replaced-by-exact-pass case. Otherwise pick the
+                // highest-count row with a passing context check.
+                candidates
+                    .iter()
+                    .filter(|r| !word.eq_ignore_ascii_case(&r.right))
+                    .filter(|r| context_ok_for_row(text, r))
+                    .max_by_key(|r| r.count)
+                    .map(|r| r.right.clone())
+            })
+        });
+
+        match replacement {
+            Some(r) => out.push_str(&r),
+            None => out.push_str(&word),
+        }
     }
     out
 }
@@ -991,7 +1100,7 @@ mod tests {
     fn replacements_require_min_count_3() {
         let rows = vec![cr("Kaidhar", "KD", 2, None)];
         assert_eq!(
-            apply_replacements("send to Kaidhar tomorrow", &rows),
+            apply_replacements("send to Kaidhar tomorrow", &rows, false),
             "send to Kaidhar tomorrow"
         );
     }
@@ -1000,12 +1109,12 @@ mod tests {
     fn replacements_apply_case_insensitively_with_word_boundaries() {
         let rows = vec![cr("Kaidhar", "KD", 3, None)];
         assert_eq!(
-            apply_replacements("send to Kaidhar tomorrow", &rows),
+            apply_replacements("send to Kaidhar tomorrow", &rows, false),
             "send to KD tomorrow"
         );
         // Word-boundary: don't munge "Kaidhardian" or "preKaidhar" if they ever appear.
         assert_eq!(
-            apply_replacements("Kaidhardian things", &rows),
+            apply_replacements("Kaidhardian things", &rows, false),
             "Kaidhardian things"
         );
     }
@@ -1020,12 +1129,44 @@ mod tests {
             Some("send the report to KD tomorrow"),
         )];
         assert_eq!(
-            apply_replacements("ship the Kaidhar plan", &rows),
+            apply_replacements("ship the Kaidhar plan", &rows, false),
             "ship the Kaidhar plan"
         );
         assert_eq!(
-            apply_replacements("send the report to Kaidhar", &rows),
+            apply_replacements("send the report to Kaidhar", &rows, false),
             "send the report to KD"
+        );
+    }
+
+    #[test]
+    fn phonetic_pass_replaces_homophone_variants() {
+        // One learned correction `Kaidhar → KD`, count above threshold, no
+        // context constraint. Phonetic pass should fix `Kaidhaar` (same
+        // Metaphone key) without a separate exact-string row.
+        let rows = vec![cr("Kaidhar", "KD", 4, None)];
+        assert_eq!(
+            apply_replacements("send to Kaidhaar tomorrow", &rows, true),
+            "send to KD tomorrow"
+        );
+    }
+
+    #[test]
+    fn phonetic_pass_off_leaves_variants_alone() {
+        let rows = vec![cr("Kaidhar", "KD", 4, None)];
+        assert_eq!(
+            apply_replacements("send to Kaidhaar tomorrow", &rows, false),
+            "send to Kaidhaar tomorrow"
+        );
+    }
+
+    #[test]
+    fn phonetic_pass_skips_already_corrected_words() {
+        // After the exact pass turned `Kaidhar` into `KD`, the phonetic pass
+        // should not re-replace `KD` with itself or any other candidate.
+        let rows = vec![cr("Kaidhar", "KD", 5, None)];
+        assert_eq!(
+            apply_replacements("send to Kaidhar tomorrow", &rows, true),
+            "send to KD tomorrow"
         );
     }
 

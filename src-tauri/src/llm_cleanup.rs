@@ -24,6 +24,31 @@ impl CleanupBackend {
     }
 }
 
+/// Quality preset for the Groq cleanup pass. `Quality` uses Llama-3.3 70B
+/// for noticeably better punctuation / casing restoration; `Fast` uses the
+/// 8B-instant for ~150–400 ms RTT when the user prefers minimum latency.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CleanupModel {
+    Fast,
+    Quality,
+}
+
+impl CleanupModel {
+    pub fn from_str(s: &str) -> Self {
+        match s {
+            "fast" => CleanupModel::Fast,
+            _ => CleanupModel::Quality,
+        }
+    }
+
+    fn groq_model_id(self) -> &'static str {
+        match self {
+            CleanupModel::Fast => "llama-3.1-8b-instant",
+            CleanupModel::Quality => "llama-3.3-70b-versatile",
+        }
+    }
+}
+
 /// Run the configured cleanup pass with `budget`. Returns the cleaned text on
 /// success; on `Off`, timeout, or error returns the original text unchanged
 /// (so callers can `let text = cleanup(...).await` without a fallback branch).
@@ -32,6 +57,7 @@ pub async fn cleanup(
     api_key: &str,
     text: &str,
     budget: Duration,
+    model: CleanupModel,
 ) -> String {
     if text.trim().is_empty() {
         return text.to_string();
@@ -40,7 +66,7 @@ pub async fn cleanup(
     match backend {
         CleanupBackend::Off => text.to_string(),
         CleanupBackend::Groq => {
-            let fut = cleanup_with_groq(api_key, text);
+            let fut = cleanup_with_groq(api_key, text, model);
             match tokio::time::timeout(budget, fut).await {
                 Ok(Ok(cleaned)) => cleaned,
                 Ok(Err(e)) => {
@@ -59,16 +85,17 @@ pub async fn cleanup(
     }
 }
 
-async fn cleanup_with_groq(api_key: &str, text: &str) -> Result<String, String> {
+async fn cleanup_with_groq(
+    api_key: &str,
+    text: &str,
+    model: CleanupModel,
+) -> Result<String, String> {
     if api_key.is_empty() {
         return Err("Groq API key not set; LLM cleanup is unavailable.".to_string());
     }
 
     let body = serde_json::json!({
-        // 8B-instant is cheap and typically hits ~150–400 ms RTT on Groq —
-        // well under our 800 ms budget. Bump to 70B-versatile if quality
-        // turns out to matter more than latency.
-        "model": "llama-3.1-8b-instant",
+        "model": model.groq_model_id(),
         "messages": [
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user",   "content": text},
@@ -117,6 +144,7 @@ mod tests {
             "",
             "hello world.",
             Duration::from_millis(800),
+            CleanupModel::Quality,
         )
         .await;
         assert_eq!(out, "hello world.");
@@ -124,7 +152,14 @@ mod tests {
 
     #[tokio::test]
     async fn empty_input_short_circuits() {
-        let out = cleanup(CleanupBackend::Groq, "key", "", Duration::from_millis(800)).await;
+        let out = cleanup(
+            CleanupBackend::Groq,
+            "key",
+            "",
+            Duration::from_millis(800),
+            CleanupModel::Quality,
+        )
+        .await;
         assert_eq!(out, "");
     }
 
@@ -135,9 +170,18 @@ mod tests {
             "",
             "hello world",
             Duration::from_millis(800),
+            CleanupModel::Fast,
         )
         .await;
         // No key -> error -> identity fallback (must not panic).
         assert_eq!(out, "hello world");
+    }
+
+    #[test]
+    fn cleanup_model_from_str_defaults_to_quality() {
+        assert_eq!(CleanupModel::from_str("fast"), CleanupModel::Fast);
+        assert_eq!(CleanupModel::from_str("quality"), CleanupModel::Quality);
+        assert_eq!(CleanupModel::from_str(""), CleanupModel::Quality);
+        assert_eq!(CleanupModel::from_str("nonsense"), CleanupModel::Quality);
     }
 }

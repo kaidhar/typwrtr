@@ -17,6 +17,7 @@ interface Settings {
   keepAudioClips: boolean;
   fixupHotkey: string;
   llmCleanup: string;
+  llmCleanupModel: string;
   streamingCaptions: boolean;
   vadSilenceMs: number;
 }
@@ -72,6 +73,7 @@ interface AppProfileRow {
   preferred_model: string | null;
   enabled: boolean;
   auto_apply_replacements: boolean;
+  phonetic_match: boolean;
   code_case: string;
   last_used_at: number | null;
   use_count: number;
@@ -130,6 +132,7 @@ const pttHotkeySet = document.getElementById("ptt-hotkey-set")!;
 const fixupHotkeyText = document.getElementById("fixup-hotkey-text")!;
 const fixupHotkeySet = document.getElementById("fixup-hotkey-set")!;
 const llmCleanupSelect = document.getElementById("llm-cleanup-select") as HTMLSelectElement;
+const llmCleanupModelSelect = document.getElementById("llm-cleanup-model-select") as HTMLSelectElement;
 const streamingCaptionsToggle = document.getElementById("streaming-captions") as HTMLInputElement;
 const vadSilenceInput = document.getElementById("vad-silence-ms") as HTMLInputElement;
 const hotkeyCaptureStatus = document.getElementById("hotkey-capture-status")!;
@@ -373,6 +376,7 @@ async function loadSettings() {
 
   // LLM cleanup
   llmCleanupSelect.value = currentSettings.llmCleanup ?? "off";
+  llmCleanupModelSelect.value = currentSettings.llmCleanupModel ?? "quality";
 
   // Streaming captions + VAD
   streamingCaptionsToggle.checked = currentSettings.streamingCaptions ?? false;
@@ -566,6 +570,11 @@ function renderAppProfile(row: AppProfileRow): HTMLElement {
           <span class="switch-track" aria-hidden="true"></span>
         </label>
         <span>Auto-apply replacements</span>
+        <label class="switch" style="margin-left:14px;">
+          <input type="checkbox" data-field="phonetic_match"${row.phonetic_match ? " checked" : ""} />
+          <span class="switch-track" aria-hidden="true"></span>
+        </label>
+        <span>Phonetic match</span>
       </div>
       <div class="right">
         <button class="btn-secondary" data-action="reset"${row.is_persisted ? "" : " disabled"}>Reset</button>
@@ -581,6 +590,7 @@ function renderAppProfile(row: AppProfileRow): HTMLElement {
   const modelEl = card.querySelector<HTMLSelectElement>('[data-field="preferred_model"]')!;
   const enabledEl = card.querySelector<HTMLInputElement>('[data-field="enabled"]')!;
   const autoApplyEl = card.querySelector<HTMLInputElement>('[data-field="auto_apply_replacements"]')!;
+  const phoneticEl = card.querySelector<HTMLInputElement>('[data-field="phonetic_match"]')!;
   const codeCaseEl = card.querySelector<HTMLSelectElement>('[data-field="code_case"]')!;
 
   // Disable Save until the user actually changes something. Because each
@@ -592,6 +602,7 @@ function renderAppProfile(row: AppProfileRow): HTMLElement {
     preferred_model: row.preferred_model ?? "",
     enabled: row.enabled,
     auto_apply_replacements: row.auto_apply_replacements,
+    phonetic_match: row.phonetic_match,
     code_case: row.code_case,
   });
   const checkDirty = () => {
@@ -601,11 +612,12 @@ function renderAppProfile(row: AppProfileRow): HTMLElement {
       preferred_model: (modelEl.value || "").trim(),
       enabled: enabledEl.checked,
       auto_apply_replacements: autoApplyEl.checked,
+      phonetic_match: phoneticEl.checked,
       code_case: codeCaseEl.value,
     });
     saveBtn.disabled = current === originalSnapshot;
   };
-  for (const el of [promptEl, postprocessEl, modelEl, enabledEl, autoApplyEl, codeCaseEl] as HTMLElement[]) {
+  for (const el of [promptEl, postprocessEl, modelEl, enabledEl, autoApplyEl, phoneticEl, codeCaseEl] as HTMLElement[]) {
     el.addEventListener("input", checkDirty);
     el.addEventListener("change", checkDirty);
   }
@@ -620,6 +632,7 @@ function renderAppProfile(row: AppProfileRow): HTMLElement {
       preferred_model: (modelEl.value || "").trim() || null,
       enabled: enabledEl.checked,
       auto_apply_replacements: autoApplyEl.checked,
+      phonetic_match: phoneticEl.checked,
       code_case: codeCaseEl.value,
       last_used_at: row.last_used_at,
       use_count: row.use_count,
@@ -894,6 +907,7 @@ async function saveSettings() {
   currentSettings.saveTranscriptions = saveTranscriptionsToggle.checked;
   currentSettings.keepAudioClips = keepAudioClipsToggle.checked;
   currentSettings.llmCleanup = llmCleanupSelect.value;
+  currentSettings.llmCleanupModel = llmCleanupModelSelect.value;
   currentSettings.streamingCaptions = streamingCaptionsToggle.checked;
   const parsedVad = Math.max(0, Math.min(2000, Math.round(Number(vadSilenceInput.value) || 0)));
   currentSettings.vadSilenceMs = parsedVad;
@@ -919,6 +933,10 @@ keepAudioClipsToggle.addEventListener("change", () => {
 });
 
 llmCleanupSelect.addEventListener("change", () => {
+  void saveSettings().catch((error) => console.error("Failed to save settings:", error));
+});
+
+llmCleanupModelSelect.addEventListener("change", () => {
   void saveSettings().catch((error) => console.error("Failed to save settings:", error));
 });
 
