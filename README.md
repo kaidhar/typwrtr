@@ -18,7 +18,7 @@
 </p>
 
 <p align="center">
-  <img src="docs/assets/typwrtr-screenshot.png" alt="typwrtr app screenshot" width="760" />
+  <img src="src\assets\typwrtr-screenshot.png" alt="typwrtr app screenshot" width="760" />
 </p>
 
 `typwrtr` is a cross-platform desktop dictation app built with Tauri. It records microphone audio from a global hotkey, transcribes speech with either local `whisper.cpp` or Groq Cloud, cleans up the result, and pastes the text into the currently focused app.
