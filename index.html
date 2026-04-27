@@ -1,0 +1,166 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>typwrtr</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet" />
+    <link rel="stylesheet" href="/src/style.css" />
+  </head>
+  <body>
+    <div id="app">
+      <div id="titlebar" data-tauri-drag-region></div>
+      <div id="app-body">
+      <aside id="sidebar">
+        <div class="sidebar-header">
+          <div class="app-identity">
+            <svg class="app-icon" width="24" height="24" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+              <rect x="2" y="2" width="20" height="20" rx="6" fill="currentColor" opacity="0.14"/>
+              <path class="logo-stem" d="M7 7.5h10M12 7.5v9" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
+              <path class="logo-wave" d="M6.8 15.5c1.2-1.8 2.4-1.8 3.6 0s2.4 1.8 3.6 0 2.4-1.8 3.6 0" stroke="currentColor" stroke-width="1.35" stroke-linecap="round"/>
+              <path class="logo-caret" d="M17.5 6.2l2 1.8-2 1.8" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/>
+            </svg>
+            <span class="app-name">typwrtr</span>
+          </div>
+          <div id="status-indicator">
+            <span id="status-dot"></span>
+            <span id="status-text">Ready</span>
+          </div>
+        </div>
+        <nav id="sidebar-nav">
+          <a class="nav-item active" data-section="general">
+            <svg class="nav-icon" width="16" height="16" viewBox="0 0 16 16" fill="none">
+              <circle cx="8" cy="8" r="6.5" stroke="currentColor" stroke-width="1.2"/>
+              <path d="M8 5v3l2 1.5" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/>
+            </svg>
+            General
+          </a>
+          <a class="nav-item" data-section="engine">
+            <svg class="nav-icon" width="16" height="16" viewBox="0 0 16 16" fill="none">
+              <path d="M2.5 8h3l1.5-3 2 6 1.5-3h3" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/>
+            </svg>
+            Engine
+          </a>
+          <a class="nav-item" data-section="recording">
+            <svg class="nav-icon" width="16" height="16" viewBox="0 0 16 16" fill="none">
+              <rect x="6" y="2.5" width="4" height="7" rx="2" stroke="currentColor" stroke-width="1.2"/>
+              <path d="M4 8.5a4 4 0 008 0M8 12.5v1.5" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/>
+            </svg>
+            Recording
+          </a>
+        </nav>
+        <div class="sidebar-footer">
+          <span class="version-text">v0.1.0</span>
+        </div>
+      </aside>
+
+      <main id="content">
+        <section id="section-general" class="content-section active">
+          <div class="section-header">
+            <h2 class="section-title">General</h2>
+            <p class="section-desc">Configure your audio input device</p>
+          </div>
+          <div class="settings-list">
+            <div class="setting-row">
+              <div class="setting-label">
+                <span class="label-text">Microphone</span>
+                <span class="label-hint">Select your preferred input device</span>
+              </div>
+              <div class="setting-control">
+                <select id="mic-select"></select>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <section id="section-engine" class="content-section">
+          <div class="section-header">
+            <h2 class="section-title">Engine</h2>
+            <p class="section-desc">Choose your transcription backend</p>
+          </div>
+          <div class="settings-list">
+            <div class="setting-row">
+              <div class="setting-label">
+                <span class="label-text">Transcription Engine</span>
+                <span class="label-hint">Local runs on-device, Cloud requires an API key</span>
+              </div>
+              <div class="setting-control">
+                <div class="toggle-group">
+                  <button id="engine-local" class="toggle-btn active">Local Whisper</button>
+                  <button id="engine-cloud" class="toggle-btn">Groq Cloud</button>
+                </div>
+              </div>
+            </div>
+            <div class="setting-row" id="local-settings">
+              <div class="setting-label">
+                <span class="label-text">Whisper Model</span>
+                <span class="label-hint">English-only models are lighter; `large-v3-turbo` is the best general local option</span>
+              </div>
+              <div class="setting-control">
+                <div class="model-row">
+                  <select id="model-select">
+                    <option value="base.en">Base English (~142 MB)</option>
+                    <option value="small.en">Small English (~466 MB)</option>
+                    <option value="small">Small Multilingual (~466 MB)</option>
+                    <option value="medium.en">Medium English (~1.5 GB)</option>
+                    <option value="medium">Medium Multilingual (~1.5 GB)</option>
+                    <option value="large-v3-turbo">Large v3 Turbo (~1.5 GB)</option>
+                    <option value="large-v3">Large v3 (~2.9 GB)</option>
+                  </select>
+                  <button id="download-btn" class="btn-primary">Download</button>
+                </div>
+              </div>
+            </div>
+            <div id="download-progress" class="hidden">
+              <div id="progress-text">Preparing download...</div>
+              <div id="progress-bar"><div id="progress-fill"></div></div>
+            </div>
+            <div class="setting-row hidden" id="cloud-settings">
+              <div class="setting-label">
+                <span class="label-text">Groq API Key</span>
+                <span class="label-hint">Get your key from console.groq.com</span>
+              </div>
+              <div class="setting-control">
+                <input type="password" id="groq-key" placeholder="gsk_..." />
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <section id="section-recording" class="content-section">
+          <div class="section-header">
+            <h2 class="section-title">Recording</h2>
+            <p class="section-desc">Configure how you trigger transcription</p>
+          </div>
+          <div class="settings-list">
+            <div class="setting-row">
+              <div class="setting-label">
+                <span class="label-text">Recording Mode</span>
+                <span class="label-hint">Toggle starts/stops, Push to Talk records while held</span>
+              </div>
+              <div class="setting-control">
+                <div class="toggle-group">
+                  <button id="mode-toggle" class="toggle-btn active">Toggle</button>
+                  <button id="mode-ptt" class="toggle-btn">Push to Talk</button>
+                </div>
+              </div>
+            </div>
+            <div class="setting-row">
+              <div class="setting-label">
+                <span class="label-text">Hotkey</span>
+                <span class="label-hint">Global keyboard shortcut to trigger recording</span>
+              </div>
+              <div class="setting-control">
+                <kbd id="hotkey-text">Ctrl+Shift+Space</kbd>
+              </div>
+            </div>
+          </div>
+        </section>
+      </main>
+      </div>
+    </div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
