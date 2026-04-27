@@ -2,7 +2,9 @@
 
 use std::path::PathBuf;
 use std::sync::Mutex;
-use tauri::{Manager, State, WebviewUrl, WebviewWindowBuilder};
+use tauri::menu::{Menu, MenuItem};
+use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
+use tauri::{Manager, State, WebviewUrl, WebviewWindowBuilder, WindowEvent};
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
 
 use typwrtr_lib::audio;
@@ -15,6 +17,17 @@ struct AppState {
     recorder: Recorder,
     settings: Mutex<Settings>,
     app_dir: PathBuf,
+}
+
+fn show_main_window(app: &tauri::AppHandle) {
+    if let Some(window) = app.get_webview_window("main") {
+        if let Err(e) = window.show() {
+            eprintln!("[typwrtr] Failed to show main window: {}", e);
+        }
+        if let Err(e) = window.set_focus() {
+            eprintln!("[typwrtr] Failed to focus main window: {}", e);
+        }
+    }
 }
 
 fn get_app_dir() -> PathBuf {
@@ -119,15 +132,75 @@ fn main() {
             download_model,
             toggle_recording,
         ])
+        .on_window_event(|window, event| {
+            if window.label() == "main" {
+                if let WindowEvent::CloseRequested { api, .. } = event {
+                    api.prevent_close();
+                    if let Err(e) = window.hide() {
+                        eprintln!("[typwrtr] Failed to hide main window: {}", e);
+                    } else {
+                        println!("[typwrtr] Main window hidden to tray");
+                    }
+                }
+            }
+        })
         .setup(move |app| {
-            // Create the overlay window (small mic icon, bottom-center, always on top)
+            let show_item = MenuItem::with_id(app, "show", "Show typwrtr", true, None::<&str>)?;
+            let quit_item = MenuItem::with_id(app, "quit", "Quit typwrtr", true, None::<&str>)?;
+            let tray_menu = Menu::with_items(app, &[&show_item, &quit_item])?;
+
+            let mut tray_builder = TrayIconBuilder::with_id("typwrtr-tray")
+                .tooltip("typwrtr")
+                .menu(&tray_menu)
+                .show_menu_on_left_click(false)
+                .on_menu_event(|app, event| match event.id().as_ref() {
+                    "show" => show_main_window(app),
+                    "quit" => {
+                        println!("[typwrtr] Quit requested from tray");
+                        app.exit(0);
+                    }
+                    _ => {}
+                })
+                .on_tray_icon_event(|tray, event| match event {
+                    TrayIconEvent::Click {
+                        button: MouseButton::Left,
+                        button_state: MouseButtonState::Up,
+                        ..
+                    }
+                    | TrayIconEvent::DoubleClick {
+                        button: MouseButton::Left,
+                        ..
+                    } => show_main_window(tray.app_handle()),
+                    _ => {}
+                });
+
+            if let Some(icon) = app.default_window_icon().cloned() {
+                tray_builder = tray_builder.icon(icon);
+            }
+
+            match tray_builder.build(app) {
+                Ok(_) => println!("[typwrtr] Tray icon created"),
+                Err(e) => eprintln!("[typwrtr] Failed to create tray icon: {}", e),
+            }
+
+            // Create the overlay window (tiny heartbeat mark, bottom-center, always on top)
+            let overlay_size = 34.0;
+            #[cfg(target_os = "windows")]
+            let overlay_bottom_gap = 96.0;
+            #[cfg(target_os = "macos")]
+            let overlay_bottom_gap = 112.0;
+            #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+            let overlay_bottom_gap = 88.0;
             let monitor = app.primary_monitor().ok().flatten();
             let (x, y) = if let Some(m) = monitor {
                 let size = m.size();
                 let scale = m.scale_factor();
                 let logical_h = size.height as f64 / scale;
                 let logical_w = size.width as f64 / scale;
-                (((logical_w - 50.0) / 2.0) as i32, (logical_h - 70.0) as i32)
+                (
+                    ((logical_w - overlay_size) / 2.0) as i32,
+                    (logical_h - overlay_bottom_gap) as i32,
+                )
             } else {
                 (680, 830)
             };
@@ -138,7 +211,7 @@ fn main() {
                 WebviewUrl::App("src/overlay.html".into()),
             )
             .title("")
-            .inner_size(50.0, 50.0)
+            .inner_size(overlay_size, overlay_size)
             .position(x as f64, y as f64)
             .resizable(false)
             .decorations(false)

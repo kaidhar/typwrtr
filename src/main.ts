@@ -39,18 +39,27 @@ const groqKey = document.getElementById("groq-key") as HTMLInputElement;
 const modeToggle = document.getElementById("mode-toggle")!;
 const modePtt = document.getElementById("mode-ptt")!;
 const hotkeyText = document.getElementById("hotkey-text")!;
+const heroStateLabel = document.getElementById("hero-state-label");
 
 // Section navigation
 const navItems = document.querySelectorAll(".nav-item");
 const sections = document.querySelectorAll(".content-section");
 
 navItems.forEach((item) => {
-  item.addEventListener("click", () => {
+  const activateSection = () => {
     const target = item.getAttribute("data-section");
     navItems.forEach((n) => n.classList.remove("active"));
     sections.forEach((s) => s.classList.remove("active"));
     item.classList.add("active");
     document.getElementById(`section-${target}`)?.classList.add("active");
+  };
+
+  item.addEventListener("click", activateSection);
+  item.addEventListener("keydown", (event) => {
+    if (event instanceof KeyboardEvent && (event.key === "Enter" || event.key === " ")) {
+      event.preventDefault();
+      activateSection();
+    }
   });
 });
 
@@ -238,12 +247,15 @@ listen<string>("recording-state", (event) => {
   if (state === "Recording") {
     statusDot.classList.add("recording");
     statusText.textContent = "Recording...";
+    if (heroStateLabel) heroStateLabel.textContent = "Listening now";
   } else if (state === "Transcribing") {
     statusDot.classList.add("transcribing");
     statusText.textContent = "Transcribing...";
+    if (heroStateLabel) heroStateLabel.textContent = "Cleaning up text";
   } else {
     statusDot.classList.add("ready");
     statusText.textContent = "Ready";
+    if (heroStateLabel) heroStateLabel.textContent = "Ready to listen";
   }
 });
 

@@ -1,29 +1,48 @@
 # typwrtr
 
+<p align="center">
+  <img src="src/assets/typwrtr-logo.svg" alt="typwrtr logo" width="120" />
+</p>
+
+<p align="center">
+  <strong>Speak anywhere. Transcribe locally or in the cloud. Paste into the app you are already using.</strong>
+</p>
+
+<p align="center">
+  <img alt="Tauri" src="https://img.shields.io/badge/Tauri-2.x-24C8DB?logo=tauri&logoColor=white">
+  <img alt="Rust" src="https://img.shields.io/badge/Rust-backend-000000?logo=rust&logoColor=white">
+  <img alt="TypeScript" src="https://img.shields.io/badge/TypeScript-frontend-3178C6?logo=typescript&logoColor=white">
+  <img alt="Whisper" src="https://img.shields.io/badge/Whisper-local-0E8F6D">
+  <img alt="Groq" src="https://img.shields.io/badge/Groq-cloud-F55036">
+  <img alt="Windows and macOS" src="https://img.shields.io/badge/Windows%20%7C%20macOS-supported-111827">
+</p>
+
 `typwrtr` is a cross-platform desktop dictation app built with Tauri. It records microphone audio from a global hotkey, transcribes speech with either local `whisper.cpp` or Groq Cloud, cleans up the result, and pastes the text into the currently focused app.
 
-## Features
+> Building this on your own laptop? Start with [docs/skill.md](docs/skill.md). It tells you which setup path to use for your OS, CPU, GPU, and model choice.
 
-- Tauri desktop shell with a Vite + TypeScript frontend
-- Rust backend for microphone capture, transcription, and paste automation
-- Toggle and push-to-talk recording modes using one shared global hotkey
-- Local Whisper transcription through a bundled `whisper.cpp` sidecar
-- Optional Groq Cloud transcription for a simple cloud-backed setup
-- On-screen mic overlay positioned near the bottom center of the primary display
-- Local model downloader with progress handling
+## Why It Matters
 
-## Hotkey
+- Dictate into any focused app instead of typing manually.
+- Use local Whisper when privacy and offline transcription matter.
+- Use Groq Cloud when you want the fastest setup with fewer native build steps.
+- Pick the right model for your machine instead of guessing.
+- Keep generated binaries, models, and build artifacts out of Git.
 
-The default shortcut is:
+## Choose Your Setup
 
-- Windows: `Ctrl+Shift+Space`
-- macOS: `Cmd+Shift+Space`
+| Your machine | Recommended path | Start with |
+| --- | --- | --- |
+| Windows + NVIDIA GPU | Local Whisper with CUDA `whisper.cpp` | `medium.en`, then try `large-v3-turbo` |
+| Windows CPU-only | Groq Cloud or CPU `whisper.cpp` | Groq Cloud or `small.en` |
+| macOS Apple Silicon | Local Whisper with Metal `whisper.cpp` | `medium.en` |
+| macOS Intel | Groq Cloud or CPU `whisper.cpp` | Groq Cloud or `small.en` |
 
-In `Toggle` mode, press once to start recording and press again to stop. In `Push to Talk` mode, hold the same shortcut to record and release it to transcribe.
+For the full machine-specific build flow, use the reusable setup skill: [docs/skill.md](docs/skill.md).
 
-## Prerequisites
+## Quick Start
 
-Install the following before running the app:
+Install prerequisites first:
 
 - Node.js 20+
 - Rust via `rustup`
@@ -31,23 +50,14 @@ Install the following before running the app:
 - Windows: Microsoft C++ Build Tools and WebView2 Runtime
 - macOS: Xcode Command Line Tools
 
-On Windows, use `npm.cmd` if PowerShell blocks plain `npm` script execution.
-
-## Run Locally
-
-Install dependencies:
+Windows:
 
 ```powershell
 npm.cmd install
-```
-
-Start the desktop app:
-
-```powershell
 npm.cmd run tauri dev
 ```
 
-On macOS or shells where `npm` works directly:
+macOS or shells where `npm` works directly:
 
 ```bash
 npm install
@@ -62,11 +72,25 @@ The Tauri config starts the Vite dev server automatically at `http://localhost:1
 2. Choose `Local Whisper` or `Groq Cloud`.
 3. For `Groq Cloud`, enter a Groq API key.
 4. For `Local Whisper`, download a model from the app and make sure the `whisper.cpp` sidecar is available.
+5. Press the hotkey and speak into any app where text can be pasted.
 
 Settings and downloaded models live under the app config directory:
 
-- Windows: `%APPDATA%\com.typwrtr.app`
-- macOS: `~/Library/Application Support/com.typwrtr.app`
+| OS | App data path |
+| --- | --- |
+| Windows | `%APPDATA%\com.typwrtr.app` |
+| macOS | `~/Library/Application Support/com.typwrtr.app` |
+
+## Hotkey
+
+The default shortcut is:
+
+| OS | Shortcut |
+| --- | --- |
+| Windows | `Ctrl+Shift+Space` |
+| macOS | `Cmd+Shift+Space` |
+
+In `Toggle` mode, press once to start recording and press again to stop. In `Push to Talk` mode, hold the same shortcut to record and release it to transcribe.
 
 ## Local Whisper
 
@@ -77,13 +101,15 @@ Local transcription needs two things:
 
 Supported model choices in the UI:
 
-- `base.en`
-- `small.en`
-- `small`
-- `medium.en`
-- `medium`
-- `large-v3-turbo`
-- `large-v3`
+| Model | Best for |
+| --- | --- |
+| `base.en` | Very fast tests |
+| `small.en` | CPU-only low latency |
+| `small` | Multilingual low latency |
+| `medium.en` | Default English dictation |
+| `medium` | Multilingual balanced quality |
+| `large-v3-turbo` | Higher accuracy on stronger machines |
+| `large-v3` | Maximum quality when latency is acceptable |
 
 Use `medium.en` as the default local choice for English dictation. Use `small.en` for lower latency on CPU-only machines. Use `large-v3-turbo` when you want higher accuracy and your machine can handle the extra runtime cost.
 
@@ -107,6 +133,18 @@ Recommended paths:
 - macOS Intel: use CPU local Whisper or Groq Cloud.
 
 The repo does not vendor the sidecar binary or downloaded model files.
+
+## Setup Skill
+
+[docs/skill.md](docs/skill.md) is the important build guide for this repo. Use it when you are:
+
+- Setting up typwrtr on a new laptop.
+- Helping someone else build it on different hardware.
+- Choosing between local Whisper and Groq Cloud.
+- Deciding whether to use CPU, NVIDIA CUDA, or Apple Silicon Metal.
+- Troubleshooting sidecar, model, or hotkey issues.
+
+The skill is designed to be followed directly by a developer or coding agent. It keeps setup decisions tied to the actual machine instead of assuming every user has the same hardware.
 
 ## Generated Files
 
@@ -136,15 +174,12 @@ cd src-tauri
 cargo check
 ```
 
-## Setup Skill
+## Add A Demo Image
 
-A reusable setup guide is included at [docs/skill.md](docs/skill.md). Use it when setting up typwrtr on a new laptop or helping someone else build the app for their own machine.
+For a more visual GitHub page, add a screenshot at:
 
-The skill walks through the hardware-specific decisions that matter for transcription speed:
+```text
+docs/assets/typwrtr-screenshot.png
+```
 
-- Windows with NVIDIA GPU: use the CUDA `whisper.cpp` path.
-- Windows CPU-only: use a CPU sidecar or Groq Cloud.
-- macOS Apple Silicon: use the Metal `whisper.cpp` path.
-- macOS Intel: use CPU local Whisper or Groq Cloud.
-
-It also covers which model to start with, where the `whisper.cpp` sidecar should live, which generated files are ignored, and what to check when setup fails. If you are adapting typwrtr for a different laptop, read [docs/skill.md](docs/skill.md) first and follow the path that matches that machine's OS, CPU, and GPU.
+Then place it near the top of this README under the badges. A short screenshot of the settings screen or recording overlay is enough to help users understand the app faster.
