@@ -177,13 +177,3 @@ npm.cmd run tauri dev
 cd src-tauri
 cargo check
 ```
-
-## Add A Demo Image
-
-For a more visual GitHub page, add a screenshot at:
-
-```text
-docs/assets/typwrtr-screenshot.png
-```
-
-Then place it near the top of this README under the badges. A short screenshot of the settings screen or recording overlay is enough to help users understand the app faster.
