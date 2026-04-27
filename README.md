@@ -17,6 +17,10 @@
   <img alt="Windows and macOS" src="https://img.shields.io/badge/Windows%20%7C%20macOS-supported-111827">
 </p>
 
+<p align="center">
+  <img src="docs/assets/typwrtr-screenshot.png" alt="typwrtr app screenshot" width="760" />
+</p>
+
 `typwrtr` is a cross-platform desktop dictation app built with Tauri. It records microphone audio from a global hotkey, transcribes speech with either local `whisper.cpp` or Groq Cloud, cleans up the result, and pastes the text into the currently focused app.
 
 > Building this on your own laptop? Start with [docs/skill.md](docs/skill.md). It tells you which setup path to use for your OS, CPU, GPU, and model choice.
