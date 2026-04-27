@@ -138,4 +138,13 @@ cargo check
 
 ## Setup Skill
 
-A reusable Codex setup guide is included at [docs/skill.md](docs/skill.md). It covers Windows, macOS, CPU-only, NVIDIA CUDA, and Apple Silicon Metal setup paths.
+A reusable setup guide is included at [docs/skill.md](docs/skill.md). Use it when setting up typwrtr on a new laptop or helping someone else build the app for their own machine.
+
+The skill walks through the hardware-specific decisions that matter for transcription speed:
+
+- Windows with NVIDIA GPU: use the CUDA `whisper.cpp` path.
+- Windows CPU-only: use a CPU sidecar or Groq Cloud.
+- macOS Apple Silicon: use the Metal `whisper.cpp` path.
+- macOS Intel: use CPU local Whisper or Groq Cloud.
+
+It also covers which model to start with, where the `whisper.cpp` sidecar should live, which generated files are ignored, and what to check when setup fails. If you are adapting typwrtr for a different laptop, read [docs/skill.md](docs/skill.md) first and follow the path that matches that machine's OS, CPU, and GPU.
