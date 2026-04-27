@@ -10,6 +10,7 @@
     <link rel="stylesheet" href="/src/style.css" />
   </head>
   <body>
+    <div id="toast-stack" aria-live="polite"></div>
     <div id="app">
       <div id="titlebar" data-tauri-drag-region>
         <div class="window-drag-label">typwrtr control room</div>
@@ -57,6 +58,29 @@
                 <path d="M6 11a6 6 0 0012 0M12 17v4" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" />
               </svg>
               <span>Recording</span>
+            </a>
+            <a class="nav-item" data-section="learning" tabindex="0">
+              <svg class="nav-icon" width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                <path d="M4 6h16M4 12h10M4 18h16" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" />
+                <circle cx="18" cy="12" r="2" stroke="currentColor" stroke-width="1.7" />
+              </svg>
+              <span>Learning</span>
+            </a>
+            <a class="nav-item" data-section="apps" tabindex="0">
+              <svg class="nav-icon" width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                <rect x="3" y="3" width="7" height="7" rx="1.5" stroke="currentColor" stroke-width="1.7" />
+                <rect x="14" y="3" width="7" height="7" rx="1.5" stroke="currentColor" stroke-width="1.7" />
+                <rect x="3" y="14" width="7" height="7" rx="1.5" stroke="currentColor" stroke-width="1.7" />
+                <rect x="14" y="14" width="7" height="7" rx="1.5" stroke="currentColor" stroke-width="1.7" />
+              </svg>
+              <span>Apps</span>
+            </a>
+            <a class="nav-item" data-section="snippets" tabindex="0">
+              <svg class="nav-icon" width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                <path d="M5 5h11l3 3v11H5z" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round" />
+                <path d="M16 5v3h3M8 11h8M8 15h6" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" />
+              </svg>
+              <span>Snippets</span>
             </a>
           </nav>
 
@@ -160,6 +184,20 @@
                 </div>
               </div>
 
+              <div class="setting-row" id="model-dir-settings">
+                <div class="setting-label">
+                  <span class="label-text">Model folder</span>
+                  <span class="label-hint">Where Whisper models are downloaded and loaded from. Defaults to the app config directory; use Select Folder to override.</span>
+                </div>
+                <div class="setting-control">
+                  <div class="path-row">
+                    <input type="text" id="model-dir" aria-label="Whisper model folder" autocomplete="off" readonly />
+                    <button id="select-model-dir" class="btn-secondary" type="button">Select folder</button>
+                    <button id="reset-model-dir" class="btn-secondary" type="button">Reset</button>
+                  </div>
+                </div>
+              </div>
+
               <div id="download-progress" class="hidden">
                 <div class="progress-header">
                   <span id="progress-text">Preparing download...</span>
@@ -177,6 +215,19 @@
                   <input type="password" id="groq-key" placeholder="gsk_..." aria-label="Groq API key" autocomplete="off" />
                 </div>
               </div>
+
+              <div class="setting-row">
+                <div class="setting-label">
+                  <span class="label-text">LLM cleanup pass</span>
+                  <span class="label-hint">After voice commands and postprocess, optionally route the text through an LLM to fix punctuation/casing without rephrasing. Time-budgeted at 800 ms; on slow networks the original text is used.</span>
+                </div>
+                <div class="setting-control">
+                  <select id="llm-cleanup-select" aria-label="LLM cleanup pass">
+                    <option value="off">Off</option>
+                    <option value="groq">Groq (uses your API key above)</option>
+                  </select>
+                </div>
+              </div>
             </div>
           </section>
 
@@ -184,35 +235,168 @@
             <div class="section-header">
               <span class="section-kicker">Step 3</span>
               <h2 class="section-title">Tune the recording trigger</h2>
-              <p class="section-desc">Choose the mode that feels natural while writing in other apps.</p>
+              <p class="section-desc">Both shortcuts are always live. Tap the toggle key to start/stop, or hold the push-to-talk key while you speak — pick whichever feels natural and use them interchangeably.</p>
             </div>
             <div class="settings-list">
-              <div class="setting-row feature-row">
+              <div class="setting-row hotkey-row">
                 <div class="setting-label">
-                  <span class="label-text">Recording Mode</span>
-                  <span class="label-hint">Toggle starts and stops. Push to Talk records while held.</span>
+                  <span class="label-text">Toggle hotkey</span>
+                  <span class="label-hint">Starts and stops recording when toggle mode is active.</span>
                 </div>
-                <div class="setting-control">
-                  <div class="toggle-group" role="group" aria-label="Recording mode">
-                    <button id="mode-toggle" class="toggle-btn active" type="button">
-                      <span>Toggle</span>
-                      <small>tap once</small>
-                    </button>
-                    <button id="mode-ptt" class="toggle-btn" type="button">
-                      <span>Push to Talk</span>
-                      <small>hold key</small>
-                    </button>
-                  </div>
+                <div class="setting-control hotkey-control">
+                  <kbd id="toggle-hotkey-text">Ctrl+Shift+Space</kbd>
+                  <button id="toggle-hotkey-set" class="btn-secondary" type="button">Set shortcut</button>
                 </div>
               </div>
+              <div class="setting-row hotkey-row">
+                <div class="setting-label">
+                  <span class="label-text">Push to Talk hotkey</span>
+                  <span class="label-hint">Press and hold this shortcut while push-to-talk mode is active.</span>
+                </div>
+                <div class="setting-control hotkey-control">
+                  <kbd id="ptt-hotkey-text">Ctrl+Shift+Enter</kbd>
+                  <button id="ptt-hotkey-set" class="btn-secondary" type="button">Set shortcut</button>
+                </div>
+              </div>
+              <div class="setting-row hotkey-row">
+                <div class="setting-label">
+                  <span class="label-text">Fix-up hotkey</span>
+                  <span class="label-hint">Select the pasted text in any app, press this shortcut, edit the correction, and typwrtr will learn from it.</span>
+                </div>
+                <div class="setting-control hotkey-control">
+                  <kbd id="fixup-hotkey-text">Ctrl+Shift+;</kbd>
+                  <button id="fixup-hotkey-set" class="btn-secondary" type="button">Set shortcut</button>
+                </div>
+              </div>
+              <div class="hotkey-note" id="hotkey-capture-status" aria-live="polite">
+                Click a shortcut button, then press the new key combo.
+              </div>
+
               <div class="setting-row">
                 <div class="setting-label">
-                  <span class="label-text">Hotkey</span>
-                  <span class="label-hint">Global keyboard shortcut to trigger recording.</span>
+                  <label class="label-text" for="streaming-captions">Streaming captions</label>
+                  <span class="label-hint">Run partial transcriptions while you speak and show them in a HUD near the bottom of the screen. Costs extra inference cycles per second.</span>
                 </div>
                 <div class="setting-control">
-                  <kbd id="hotkey-text">Ctrl+Shift+Space</kbd>
+                  <label class="switch">
+                    <input type="checkbox" id="streaming-captions" />
+                    <span class="switch-track" aria-hidden="true"></span>
+                  </label>
                 </div>
+              </div>
+
+              <div class="setting-row">
+                <div class="setting-label">
+                  <span class="label-text">Auto-finalize on silence</span>
+                  <span class="label-hint">In toggle mode, stop recording after this much continuous silence (ms). Push-to-talk ignores this. <code>0</code> disables auto-stop.</span>
+                </div>
+                <div class="setting-control">
+                  <input type="number" id="vad-silence-ms" min="0" max="2000" step="100" aria-label="VAD silence threshold ms" />
+                </div>
+              </div>
+            </div>
+          </section>
+
+          <section id="section-learning" class="content-section">
+            <div class="section-header">
+              <span class="section-kicker">Privacy</span>
+              <h2 class="section-title">Self-learning data</h2>
+              <p class="section-desc">typwrtr can keep your transcriptions on this machine to improve recognition over time. Everything stays local. Turn it off to dictate without leaving a trail.</p>
+            </div>
+            <div class="settings-list">
+              <div class="setting-row">
+                <div class="setting-label">
+                  <label class="label-text" for="save-transcriptions">Save transcriptions for self-learning</label>
+                  <span class="label-hint">Stores text and metadata in <code>typwrtr.sqlite</code> under your app config folder.</span>
+                </div>
+                <div class="setting-control">
+                  <label class="switch">
+                    <input type="checkbox" id="save-transcriptions" />
+                    <span class="switch-track" aria-hidden="true"></span>
+                  </label>
+                </div>
+              </div>
+
+              <div class="setting-row">
+                <div class="setting-label">
+                  <label class="label-text" for="keep-audio-clips">Keep audio clips</label>
+                  <span class="label-hint">Off by default. Audio is written to <code>app_dir/audio/</code> alongside the row when this is on.</span>
+                </div>
+                <div class="setting-control">
+                  <label class="switch">
+                    <input type="checkbox" id="keep-audio-clips" />
+                    <span class="switch-track" aria-hidden="true"></span>
+                  </label>
+                </div>
+              </div>
+
+              <div class="setting-row">
+                <div class="setting-label">
+                  <span class="label-text">Stored on this machine</span>
+                  <span class="label-hint" id="db-health-line">Loading…</span>
+                </div>
+                <div class="setting-control">
+                  <button id="clear-learning-btn" class="btn-secondary" type="button">Clear all learning data</button>
+                </div>
+              </div>
+
+              <div class="learning-block">
+                <div class="learning-block-header">
+                  <h3>Top corrections</h3>
+                  <span class="label-hint">Pairs typwrtr learned from your fix-ups. Substitution kicks in at count ≥ 3.</span>
+                </div>
+                <div class="learning-table" id="top-corrections-table">
+                  <div class="empty-state">No corrections recorded yet.</div>
+                </div>
+              </div>
+
+              <div class="learning-block">
+                <div class="learning-block-header">
+                  <h3>Top vocabulary terms</h3>
+                  <span class="label-hint">Proper-noun-shaped terms promoted from corrections. Higher weight = seen more often.</span>
+                </div>
+                <div class="learning-table" id="top-vocab-table">
+                  <div class="empty-state">No vocabulary terms recorded yet.</div>
+                </div>
+              </div>
+            </div>
+          </section>
+
+          <section id="section-snippets" class="content-section">
+            <div class="section-header">
+              <span class="section-kicker">Templates</span>
+              <h2 class="section-title">Snippets</h2>
+              <p class="section-desc">
+                Triggers like "insert email signature" expand inline as you dictate. Dynamic snippets can use <code>{{date}}</code>, <code>{{time}}</code>, <code>{{day}}</code>, <code>{{clipboard}}</code>, and <code>{{selection}}</code>. Triggers are case-insensitive.
+              </p>
+            </div>
+            <div class="settings-list">
+              <div class="setting-row">
+                <div class="setting-label">
+                  <span class="label-text">Add a snippet</span>
+                  <span class="label-hint">Trigger should be a phrase you can naturally say (e.g. "insert standup template").</span>
+                </div>
+                <div class="setting-control">
+                  <button id="snippet-add-btn" class="btn-primary" type="button">New snippet</button>
+                </div>
+              </div>
+              <div class="settings-list" id="snippets-list">
+                <div class="empty-state" id="snippets-empty">No snippets yet — start by editing one of the defaults.</div>
+              </div>
+            </div>
+          </section>
+
+          <section id="section-apps" class="content-section">
+            <div class="section-header">
+              <span class="section-kicker">Per-app tuning</span>
+              <h2 class="section-title">App profiles</h2>
+              <p class="section-desc">
+                typwrtr lists every app you've dictated into. Give each one a vocabulary prompt to bias whisper toward your jargon, pick a postprocess mode for cleanup, optionally pin a different model, or disable learning for sensitive apps.
+              </p>
+            </div>
+            <div class="settings-list" id="app-profiles-list">
+              <div class="empty-state" id="app-profiles-empty">
+                Dictate into a few apps first — they'll show up here. The foreground app you were focused on at paste time is the one we record.
               </div>
             </div>
           </section>

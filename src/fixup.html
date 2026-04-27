@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Teach typwrtr</title>
+    <link rel="stylesheet" href="/src/style.css" />
+    <link rel="stylesheet" href="/src/fixup.css" />
+  </head>
+  <body class="fixup-body">
+    <div id="fixup-app">
+      <header class="fixup-header">
+        <h1>Teach typwrtr a correction</h1>
+        <p id="fixup-subtitle">Capturing your selection…</p>
+      </header>
+
+      <main class="fixup-main hidden" id="fixup-main">
+        <div class="fixup-pane">
+          <label>What was pasted</label>
+          <textarea id="fixup-original" readonly></textarea>
+        </div>
+        <div class="fixup-pane">
+          <label>What it should have been</label>
+          <textarea id="fixup-corrected" autofocus></textarea>
+        </div>
+      </main>
+
+      <footer class="fixup-footer">
+        <span id="fixup-status"></span>
+        <div class="fixup-actions">
+          <button id="fixup-cancel" class="btn-secondary" type="button">Cancel</button>
+          <button id="fixup-save" class="btn-primary" type="button" disabled>Save correction</button>
+        </div>
+      </footer>
+    </div>
+    <script type="module" src="/src/fixup.ts"></script>
+  </body>
+</html>

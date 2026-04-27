@@ -15,14 +15,35 @@ tauri-build = { version = "2", features = [] }
 [dependencies]
 tauri = { version = "2", features = ["macos-private-api", "tray-icon"] }
 tauri-plugin-global-shortcut = "2"
-tauri-plugin-shell = "2"
+tauri-plugin-dialog = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 cpal = "0.15"
 enigo = "0.2"
 reqwest = { version = "0.12", features = ["multipart", "json", "stream"] }
 hound = "3.5"
-tokio = { version = "1", features = ["full"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "fs", "process", "time", "sync"] }
 dirs = "6"
 arboard = "3"
 futures-util = "0.3"
+keyring = { version = "3", features = ["apple-native", "windows-native", "linux-native-sync-persistent"] }
+rusqlite = { version = "0.32", features = ["bundled"] }
+active-win-pos-rs = "0.9"
+similar = "2"
+rubato = "0.15"
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+
+# whisper-rs is split per-target so each OS picks the right GPU backend by
+# default: Metal on macOS, CUDA on Windows/Linux. The CUDA build requires the
+# NVIDIA CUDA Toolkit (nvcc on PATH) at compile time. To fall back to a
+# CPU-only build on a Windows/Linux machine without CUDA, drop the features
+# array on the second target line.
+[target.'cfg(target_os = "macos")'.dependencies]
+whisper-rs = { version = "0.16", features = ["metal"] }
+core-graphics = "0.24"
+
+[target.'cfg(not(target_os = "macos"))'.dependencies]
+whisper-rs = { version = "0.16", features = ["cuda"] }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Com", "Win32_UI_Accessibility"] }

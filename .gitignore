@@ -35,3 +35,9 @@ src-tauri/icons/64x64.png
 src-tauri/icons/android/
 src-tauri/icons/ios/
 whisper.cpp/
+docs/implementation-plan.md
+docs/typwrtr-evaluation.md
+release/
+
+# Claude Code workspace settings — local to this checkout, not for the repo.
+.claude/

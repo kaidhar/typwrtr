@@ -5,10 +5,7 @@ pub fn cleanup_text(text: &str) -> String {
     }
 
     // Normalize multiple spaces to single space
-    let normalized: String = trimmed
-        .split_whitespace()
-        .collect::<Vec<&str>>()
-        .join(" ");
+    let normalized: String = trimmed.split_whitespace().collect::<Vec<&str>>().join(" ");
 
     // Capitalize first letter of each sentence
     let mut result = String::new();

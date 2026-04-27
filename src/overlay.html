@@ -27,8 +27,8 @@
       .mic {
         position: relative;
         display: grid;
-        width: 26px;
-        height: 26px;
+        width: 30px;
+        height: 30px;
         place-items: center;
         color: rgba(52, 211, 153, 0.88);
         background:
@@ -42,14 +42,41 @@
           inset 0 1px 0 rgba(255, 255, 255, 0.08);
         backdrop-filter: blur(10px);
         -webkit-backdrop-filter: blur(10px);
+        cursor: pointer;
         opacity: 0.82;
+        transform: translateZ(0);
+        transform-origin: center;
         transition:
-          width 180ms ease,
+          transform 220ms cubic-bezier(0.2, 0.8, 0.2, 1),
           color 180ms ease,
           opacity 180ms ease,
           background 180ms ease,
           border-color 180ms ease,
           box-shadow 180ms ease;
+      }
+
+      .mic:hover {
+        color: #ecfdf5;
+        opacity: 1;
+        background:
+          radial-gradient(circle at 50% 28%, rgba(255, 255, 255, 0.2), transparent 42%),
+          linear-gradient(135deg, rgba(16, 185, 129, 0.92), rgba(20, 184, 166, 0.72)),
+          rgba(10, 14, 12, 0.9);
+        border-color: rgba(167, 243, 208, 0.46);
+        box-shadow:
+          0 12px 26px rgba(0, 0, 0, 0.34),
+          0 0 20px rgba(52, 211, 153, 0.38),
+          inset 0 1px 0 rgba(255, 255, 255, 0.14);
+        animation: hoverHeartbeatFloat 1.8s cubic-bezier(0.34, 1.56, 0.64, 1) infinite;
+      }
+
+      .mic:active {
+        transform: scale(0.92);
+        transition-duration: 90ms;
+      }
+
+      .mic.is-clicking {
+        animation: clickPop 420ms cubic-bezier(0.2, 0.8, 0.2, 1);
       }
 
       .mic::before {
@@ -61,12 +88,18 @@
         opacity: 0;
       }
 
+      .mic:hover::before {
+        border-color: rgba(167, 243, 208, 0.34);
+        animation: hoverHeartbeatRing 1.15s ease-out infinite;
+      }
+
       .mic svg {
         position: relative;
         z-index: 1;
-        width: 17px;
-        height: 17px;
+        width: 18px;
+        height: 18px;
         overflow: visible;
+        filter: drop-shadow(0 0 4px rgba(52, 211, 153, 0.16));
       }
 
       .heartbeat-line {
@@ -84,9 +117,16 @@
         opacity: 0.7;
       }
 
+      .mic:hover .heartbeat-line {
+        animation: hoverHeartbeatDraw 1.8s cubic-bezier(0.37, 0, 0.63, 1) infinite;
+      }
+
+      .mic:hover .heartbeat-dot {
+        animation: hoverDotPulse 1.8s ease-in-out infinite;
+      }
+
       .mic.recording,
       .mic.transcribing {
-        width: 32px;
         opacity: 1;
       }
 
@@ -186,6 +226,85 @@
         }
       }
 
+      @keyframes hoverHeartbeatFloat {
+        0%,
+        100% {
+          transform: translateY(0) scale(1);
+        }
+        18%,
+        24% {
+          transform: translateY(-2px) scale(1.08);
+        }
+        38% {
+          transform: translateY(0) scale(1.02);
+        }
+        58% {
+          transform: translateY(-1px) scale(1.05);
+        }
+        78% {
+          transform: translateY(0) scale(1.01);
+        }
+      }
+
+      @keyframes hoverHeartbeatRing {
+        0% {
+          opacity: 0.36;
+          transform: scale(0.86);
+        }
+        70%,
+        100% {
+          opacity: 0;
+          transform: scale(1.3);
+        }
+      }
+
+      @keyframes hoverHeartbeatDraw {
+        0% {
+          stroke-dasharray: 5 38;
+          stroke-dashoffset: 20;
+        }
+        36% {
+          stroke-dasharray: 30 38;
+          stroke-dashoffset: 0;
+        }
+        58% {
+          stroke-dasharray: 38 38;
+          stroke-dashoffset: 0;
+        }
+        100% {
+          stroke-dasharray: 38 38;
+          stroke-dashoffset: -38;
+        }
+      }
+
+      @keyframes hoverDotPulse {
+        0%,
+        100% {
+          opacity: 0.62;
+          transform: scale(1);
+        }
+        22% {
+          opacity: 1;
+          transform: scale(1.32);
+        }
+        52% {
+          opacity: 0.8;
+          transform: scale(0.94);
+        }
+      }
+
+      @keyframes clickPop {
+        0% {
+          transform: scale(0.92);
+        }
+        45% {
+          transform: scale(1.14);
+        }
+        100% {
+          transform: scale(1);
+        }
+      }
+
       @media (prefers-reduced-motion: reduce) {
         *,
         *::before,
@@ -198,11 +317,33 @@
     </style>
   </head>
   <body>
-    <div class="mic" id="mic" aria-hidden="true">
+    <div class="mic" id="mic" aria-hidden="true" title="Start recording">
       <svg viewBox="0 0 24 24" fill="none">
         <path class="heartbeat-line" d="M3 12h3l2-4 3.2 8 2.5-5h2.4l1.1 1H21" />
         <circle class="heartbeat-dot" cx="3" cy="12" r="1.5" />
       </svg>
     </div>
+    <script type="module">
+      import { invoke } from "@tauri-apps/api/core";
+
+      const mic = document.getElementById("mic");
+      let pending = false;
+
+      mic.addEventListener("click", async () => {
+        if (pending || mic.classList.contains("transcribing")) return;
+        pending = true;
+        mic.classList.add("is-clicking");
+        window.setTimeout(() => mic.classList.remove("is-clicking"), 420);
+        try {
+          await invoke("toggle_recording");
+        } catch (error) {
+          console.error("[typwrtr] Overlay toggle failed:", error);
+        } finally {
+          window.setTimeout(() => {
+            pending = false;
+          }, 180);
+        }
+      });
+    </script>
   </body>
 </html>
