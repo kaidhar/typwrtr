@@ -41,3 +41,4 @@ release/
 
 # Claude Code workspace settings — local to this checkout, not for the repo.
 .claude/
+.pi

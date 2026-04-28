@@ -54,7 +54,7 @@ A pitch deck for executives — what we built, why it beats the leaders, and wha
               │  Pipeline                                │
               │  cleanup → replacement table             │
               │       → voice commands → postprocess     │
-              │       → optional LLM cleanup → paste     │
+              │       → deterministic scrub → paste      │
               └────────────────┬─────────────────────────┘
                                ▼
               ┌──────────────────────────────────────────┐
@@ -76,12 +76,13 @@ A pitch deck for executives — what we built, why it beats the leaders, and wha
 |---|---|---|---|
 | Where audio goes | **Your GPU** | Their data centre | Your CPU/GPU |
 | Where transcripts are stored | Your SQLite (`<app_dir>/typwrtr.sqlite`) | Their servers (default) | Nowhere |
+| Where post-processing runs | **In-process Rust (rules)** | Their cloud LLM | n/a (no cleanup) |
 | Required for offline | Nothing | **Internet** | Nothing |
 | GPU acceleration | CUDA + Metal, in-process | n/a (cloud) | CUDA + Metal |
 | Engine | `whisper-rs` linking `whisper.cpp` natively | proprietary cloud | `whisper.cpp` + Parakeet V3 |
 
 **Speaker notes:**
-"Wispr Flow's privacy mode prevents *training*, but transcription itself still leaves the machine — there's no on-device option in their product. We do the same `whisper.cpp` Wispr's competitors use, GPU-accelerated, in your process. On an RTX 5070 we measured sub-200 ms decode for 5 s utterances. Same quality, no network."
+"Wispr Flow's privacy mode prevents *training*, but transcription itself still leaves the machine — there's no on-device option in their product. We do the same `whisper.cpp` Wispr's competitors use, GPU-accelerated, in your process. On an RTX 5070 we measured sub-200 ms decode for 5 s utterances. Post-processing is also fully on-machine — two deterministic Rust passes (collapse repeats, scrub canonical hallucinations) run after every dictation. No daemon, no API key, no cloud LLM."
 
 ---
 
@@ -93,9 +94,9 @@ A pitch deck for executives — what we built, why it beats the leaders, and wha
 2. **Automatic.** After every paste, a watcher polls the focused field. When the user's edits stabilise (or focus moves elsewhere), the diff is captured and learned without any explicit save.
 
 **What gets learned:**
-- **Corrections table.** Every (wrong, right, context) triple. After count ≥ 3, the replacement table fires pre-paste — homophones get fixed before you see them.
+- **Corrections table.** Every (wrong, right, context) triple. The replacement table fires pre-paste at `count ≥ 1` — one fix is enough; homophones get corrected before you see them on the next dictation.
 - **Vocabulary table.** Proper-noun-shaped right-side tokens promoted automatically. Top 20 per-app + top 10 global appended to whisper's `initial_prompt` on every dictation, biasing the next decode.
-- **Tombstones.** Click "Forget" on any row and it stays gone — no re-learning.
+- **Tombstones.** Click "Forget" on any row and it stays gone — no re-learning. The `count ≥ 1` threshold is safe because tombstones make every false positive recoverable in one click.
 
 **Speaker notes:**
 "This is the part Handy literally cannot do. Handy is a hotkey + Whisper, no data layer. Wispr Flow has a 'personal dictionary' that learns from corrections — but in their cloud, with their schema, that you can't audit, export, or take with you when you leave. We persist everything in SQLite under your app config dir; it's yours, it's portable, and you can `sqlite3` it whenever you want."
@@ -119,7 +120,7 @@ Every focused app gets its own profile with:
 
 ---
 
-## Slide 8 — Composable on top: voice commands, snippets, LLM cleanup
+## Slide 8 — Composable on top: voice commands, snippets, deterministic scrub
 
 **Voice commands** in the same utterance:
 - `new line` / `new paragraph`
@@ -131,10 +132,10 @@ Every focused app gets its own profile with:
 - `{{date}}` / `{{time}}` / `{{day}}` / `{{clipboard}}` / `{{selection}}`
 - "insert email signature" → your saved sig, inline.
 
-**Optional LLM cleanup** — Groq Llama-3.1 8B-instant pass with a fixed *"do not rephrase"* system prompt. 800 ms timeout-budgeted; on failure, identity fallback. Off by default.
+**Deterministic post-processing scrub.** Every dictation runs through two cheap Rust passes after voice commands and postprocess: `collapse_repeats` (kills `i i want` artifacts) and `scrub_hallucinations` (Aho-Corasick whole-line / trailing match against the canonical Whisper hallucination bag — `Thanks for watching.`, `Subtitles by the Amara.org community`, standalone `[Music]` / `♪`). O(n) per pass; runs unconditionally; no model, no daemon, no download. Replaces an earlier on-device T5 corrector that cost 3–5 s on CPU and earned its keep on a residual class of fixes (verb tense, subject-verb agreement) that turn out to be rare in deliberate single-speaker dictation.
 
 **Speaker notes:**
-"All three of these are stackable. You can dictate `code mode my new function` into VS Code and it pastes `myNewFunction` because the IDE profile is set to camelCase and the voice command activated code mode. None of our competitors compose this cleanly — Wispr Flow has voice commands, doesn't have local snippets-with-clipboard-templates; Handy has neither."
+"All three of these are stackable. You can dictate `code mode my new function` into VS Code and it pastes `myNewFunction` because the IDE profile is set to camelCase and the voice command activated code mode. None of our competitors compose this cleanly — Wispr Flow has voice commands, doesn't have local snippets-with-clipboard-templates; Handy has neither. And our scrub stage is the only post-processing layer in the category that runs as deterministic rules with zero latency — Wispr Flow does it in their cloud LLM, Handy doesn't do it at all. We tried an on-device T5 corrector, measured the value, and ripped it out for the rules — same observed wins, none of the cost."
 
 ---
 
@@ -143,7 +144,8 @@ Every focused app gets its own profile with:
 **typwrtr default install:**
 - Audio: never transmitted. Optional retention to `<app_dir>/audio/`, off by default.
 - Transcripts: local SQLite. Toggle off and the recorder runs end-to-end without writing.
-- Groq API key: OS keychain (Windows Credential Manager, macOS Keychain). Never on disk.
+- Post-processing: deterministic Rust passes inside the recorder. No daemon, no cloud LLM, no API keys to manage.
+- Clipboard: snapshotted before every paste and restored ~120 ms later, so dictation never silently overwrites what the user had copied.
 - Screenshots: never captured.
 
 **Wispr Flow default install:**
@@ -204,9 +206,9 @@ Plus opt-in **streaming captions overlay**: partial transcriptions every 700 ms 
 | Per-app profiles | ✅ 5-axis | partial (tone) | ❌ |
 | Inline voice commands | ✅ | ✅ | ❌ |
 | Snippets with templating | ✅ `{{vars}}` | ✅ | ❌ |
-| LLM cleanup pass (optional) | ✅ Groq | n/a (always-on cleanup) | ❌ |
+| Post-processing cleanup | ✅ deterministic Rust (no model) | cloud LLM (always-on) | ❌ |
 | Streaming captions | ✅ | ❌ | ❌ |
-| API key in OS keychain | ✅ | n/a | n/a |
+| Zero API keys / cloud accounts required | ✅ | ❌ | ✅ |
 | Open-source | ✅ MIT (planned) | ❌ proprietary | ✅ MIT |
 | Forkable | ✅ | ❌ | ✅ (their explicit positioning) |
 | Subscription | ❌ free | $144/yr | ❌ free |
@@ -219,9 +221,14 @@ Plus opt-in **streaming captions overlay**: partial transcriptions every 700 ms 
 ## Slide 13 — Roadmap
 
 **Shipped (this session):**
-- Phases 0–6 of the implementation plan: data layer, app context, self-learning loop, voice commands, postprocess + LLM cleanup, streaming captions, snippets.
+- Phases 0–6 of the implementation plan: data layer, app context, self-learning loop, voice commands, postprocess + cleanup scrub, streaming captions, snippets.
 - Auto-learn watcher with focus-change + idle-debounce trigger and false-positive guards.
-- 100 unit tests, all passing.
+- **Lever pass for accuracy** — `beam_size=5` decoding, hallucination guards (`no_speech_thold`, `suppress_nst`), per-app phonetic-match replacements via Metaphone.
+- **Deterministic post-processing scrub** — `collapse_repeats` + `scrub_hallucinations` (Aho-Corasick) run on every dictation, O(n), no model. Replaces the earlier on-device T5 grammar corrector (240 MB download, 3–5 s CPU latency); kept the observed wins, dropped the cost. Three retired backends in three iterations (cloud Groq → self-hosted Ollama → on-device T5 → deterministic rules) — each `config.json` migration is one-shot and silent.
+- **Replacement table threshold lowered to `count ≥ 1`** — one learned correction is enough; tombstones cover the false-positive recovery path so the threshold is safe.
+- **Clipboard-safe paste** — prior clipboard snapshot + restore around the synthesised paste keystroke.
+- **Module reorg** — `cleanup/`, `audio/`, `clipboard/`, `db/` split into per-domain submodules; `recorder.rs` shed its grammar-corrector field; commands + context flattened from single-file folders.
+- 116 unit tests, all passing.
 
 **Next 4 weeks:**
 1. **Phase 7** — Karpathy-flavoured per-user trigram language model, rescores whisper top-k. Held-out eval determines whether it ships enabled or disabled.
@@ -232,7 +239,7 @@ Plus opt-in **streaming captions overlay**: partial transcriptions every 700 ms 
 **Next quarter:**
 - WER chart in the Learning tab (data is already in the DB; UI only).
 - GitHub Actions release pipeline — tag → Win/Mac/Linux artifacts auto-built and signed.
-- Local LLM cleanup via `llama.cpp` sidecar (deferred from Phase 4 §4.2).
+- Speculative streaming paste — pipe stable partials directly into the focused app, finalise on stop. Turns dictation into real-time text, not stop-and-commit.
 
 **Speaker notes:**
 "Phase 7 is the part that earns the *'Karpathy-flavoured'* label — small model, your own data, your own loop, with a held-out eval as the kill switch. Whatever number it produces decides whether the feature ships or stays behind a flag. That's the discipline our competitors can't match because they'd never build a feature *and instrument it to disable itself if the data doesn't support it.*"
@@ -270,17 +277,19 @@ Plus opt-in **streaming captions overlay**: partial transcriptions every 700 ms 
 ## Appendix A — One-page feature matrix (handout)
 
 ```
-                      typwrtr   Wispr Flow   Handy
-Local-only            ✓         ✗            ✓
-GPU (CUDA/Metal)      ✓         n/a          ✓
-Self-learns           ✓         ✓ (cloud)    ✗
-Per-app profiles      5-axis    partial      ✗
-Voice commands        ✓ (10+)   ✓            ✗
-Snippets              ✓ vars    ✓            ✗
-LLM cleanup           opt-in    forced       ✗
-Streaming captions    ✓         ✗            ✗
-Open source           MIT       ✗            MIT
-Subscription          free      $144/yr      free
+                      typwrtr      Wispr Flow   Handy
+Local-only            ✓            ✗            ✓
+GPU (CUDA/Metal)      ✓            n/a          ✓
+Self-learns           ✓            ✓ (cloud)    ✗
+Per-app profiles      5-axis       partial      ✗
+Voice commands        ✓ (10+)      ✓            ✗
+Snippets              ✓ vars       ✓            ✗
+Post-process cleanup  determ. rules         cloud LLM      ✗
+Streaming captions    ✓            ✗            ✗
+Clipboard-safe paste  ✓            ?            ?
+Zero cloud accounts   ✓            ✗            ✓
+Open source           MIT          ✗            MIT
+Subscription          free         $144/yr      free
 ```
 
 ## Appendix B — Speaker-Q&A prep

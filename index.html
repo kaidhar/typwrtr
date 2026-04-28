@@ -140,29 +140,10 @@
           <section id="section-engine" class="content-section">
             <div class="section-header">
               <span class="section-kicker">Step 2</span>
-              <h2 class="section-title">Select a transcription engine</h2>
-              <p class="section-desc">Use local Whisper for privacy or Groq Cloud for the fastest setup path.</p>
+              <h2 class="section-title">Whisper model</h2>
+              <p class="section-desc">Local Whisper transcribes on-device. Pick a model that suits your hardware. An optional self-hosted LLM cleanup pass is configured at the bottom of this section.</p>
             </div>
             <div class="settings-list">
-              <div class="setting-row feature-row">
-                <div class="setting-label">
-                  <span class="label-text">Transcription Engine</span>
-                  <span class="label-hint">Local runs on-device. Cloud requires an API key.</span>
-                </div>
-                <div class="setting-control">
-                  <div class="toggle-group" role="group" aria-label="Transcription engine">
-                    <button id="engine-local" class="toggle-btn active" type="button">
-                      <span>Local Whisper</span>
-                      <small>private</small>
-                    </button>
-                    <button id="engine-cloud" class="toggle-btn" type="button">
-                      <span>Groq Cloud</span>
-                      <small>fast setup</small>
-                    </button>
-                  </div>
-                </div>
-              </div>
-
               <div class="setting-row" id="local-settings">
                 <div class="setting-label">
                   <span class="label-text">Whisper Model</span>
@@ -206,41 +187,6 @@
                 <div id="progress-bar"><div id="progress-fill"></div></div>
               </div>
 
-              <div class="setting-row hidden" id="cloud-settings">
-                <div class="setting-label">
-                  <span class="label-text">Groq API Key</span>
-                  <span class="label-hint">Paste a key from console.groq.com. It is stored locally.</span>
-                </div>
-                <div class="setting-control">
-                  <input type="password" id="groq-key" placeholder="gsk_..." aria-label="Groq API key" autocomplete="off" />
-                </div>
-              </div>
-
-              <div class="setting-row">
-                <div class="setting-label">
-                  <span class="label-text">LLM cleanup pass</span>
-                  <span class="label-hint">After voice commands and postprocess, optionally route the text through an LLM to fix punctuation/casing without rephrasing. Time-budgeted at 800 ms; on slow networks the original text is used.</span>
-                </div>
-                <div class="setting-control">
-                  <select id="llm-cleanup-select" aria-label="LLM cleanup pass">
-                    <option value="off">Off</option>
-                    <option value="groq">Groq (uses your API key above)</option>
-                  </select>
-                </div>
-              </div>
-
-              <div class="setting-row">
-                <div class="setting-label">
-                  <span class="label-text">LLM cleanup model</span>
-                  <span class="label-hint">Quality uses Llama&nbsp;3.3 70B (better punctuation, ~400–700 ms). Fast uses Llama&nbsp;3.1 8B-instant (~150–400 ms). Both stay inside the 800 ms timeout; identity fallback on miss.</span>
-                </div>
-                <div class="setting-control">
-                  <select id="llm-cleanup-model-select" aria-label="LLM cleanup model">
-                    <option value="quality">Quality (Llama 3.3 70B)</option>
-                    <option value="fast">Fast (Llama 3.1 8B)</option>
-                  </select>
-                </div>
-              </div>
             </div>
           </section>
 

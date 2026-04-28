@@ -3,6 +3,7 @@
 //! storage lives in `db::mod` alongside the rest of the schema.
 
 pub mod diff;
+pub mod focused_text;
 
 use crate::db::Db;
 use diff::pairs_from_diff;

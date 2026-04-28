@@ -13,9 +13,9 @@ use std::sync::Arc;
 use std::time::Duration;
 use tauri::{AppHandle, Emitter};
 
-use crate::audio::{self, AudioRecorder};
+use crate::audio::capture::{self as audio, AudioRecorder};
 use crate::transcribe_local::{LocalTranscriber, TranscribeOptions};
-use crate::vad;
+use crate::audio::vad;
 
 /// Configuration for one streaming session. Lifted from `Settings` at
 /// `Recorder::start_recording` time so changes don't take effect mid-recording.
@@ -149,8 +149,8 @@ pub fn spawn(
             let result = local_clone.transcribe(&model_path, processed, opts).await;
 
             match result {
-                Ok(text) => {
-                    let trimmed = text.trim();
+                Ok(res) => {
+                    let trimmed = res.text.trim();
                     if !trimmed.is_empty() && trimmed != last_partial_text {
                         last_partial_text = trimmed.to_string();
                         let payload = PartialPayload {

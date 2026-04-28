@@ -69,13 +69,24 @@ impl LocalTranscriber {
         model_path: &Path,
         samples: Vec<f32>,
         opts: TranscribeOptions,
-    ) -> Result<String, String> {
+    ) -> Result<TranscribeResult, String> {
         let ctx = self.ensure_loaded(model_path)?;
 
         tokio::task::spawn_blocking(move || transcribe_blocking(ctx, samples, opts))
             .await
             .map_err(|e| format!("Transcription join error: {}", e))?
     }
+}
+
+/// Decoded text plus a confidence proxy. `avg_logprob` is the mean per-token
+/// log-prob across all segments; closer to 0 = more confident. Values around
+/// -0.3 are clean utterances; below -0.7 are usually noisy / hallucinated.
+/// `0.0` means whisper produced no scorable tokens (treat as "no signal",
+/// not "perfect").
+#[derive(Debug, Clone)]
+pub struct TranscribeResult {
+    pub text: String,
+    pub avg_logprob: f32,
 }
 
 /// Knobs for a single transcription. Designed to grow as Phase 2 (vocabulary
@@ -115,7 +126,7 @@ fn transcribe_blocking(
     ctx: Arc<WhisperContext>,
     samples: Vec<f32>,
     opts: TranscribeOptions,
-) -> Result<String, String> {
+) -> Result<TranscribeResult, String> {
     let mut state = ctx
         .create_state()
         .map_err(|e| format!("Failed to create whisper state: {}", e))?;
@@ -169,6 +180,8 @@ fn transcribe_blocking(
 
     let n = state.full_n_segments();
     let mut text = String::new();
+    let mut sum_plog = 0.0_f32;
+    let mut tok_count = 0_usize;
     for i in 0..n {
         let seg = state
             .get_segment(i)
@@ -177,8 +190,32 @@ fn transcribe_blocking(
             .to_str_lossy()
             .map_err(|e| format!("segment {} to_str_lossy: {}", i, e))?;
         text.push_str(&chunk);
+
+        let n_tok = seg.n_tokens();
+        for j in 0..n_tok {
+            if let Some(tok) = seg.get_token(j) {
+                let td = tok.token_data();
+                // Skip special tokens (BEG/EOT/timestamps): their ids sit at
+                // or above the text-token boundary (~50256). Also skip the
+                // sentinel `plog == 0.0` rows whisper emits for unscored
+                // entries — including them biases the mean toward 0.
+                if td.id >= 50256 || td.plog == 0.0 {
+                    continue;
+                }
+                sum_plog += td.plog;
+                tok_count += 1;
+            }
+        }
     }
-    Ok(text.trim().to_string())
+    let avg_logprob = if tok_count > 0 {
+        sum_plog / tok_count as f32
+    } else {
+        0.0
+    };
+    Ok(TranscribeResult {
+        text: text.trim().to_string(),
+        avg_logprob,
+    })
 }
 
 pub fn model_filename(model_size: &str) -> String {

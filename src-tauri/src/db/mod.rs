@@ -1,7 +1,27 @@
-use rusqlite::{params, Connection};
+//! SQLite store for self-learning + per-app profiles + snippets +
+//! transcriptions. The `Db` handle is single-threaded behind a `Mutex` so
+//! it can ride alongside the recorder/transcriber singletons in Tauri
+//! managed state.
+//!
+//! Code is split by domain:
+//! * [`migrate`] — schema migrations (`PRAGMA user_version`).
+//! * [`profiles`] — `app_profiles` rows and the Apps tab list query.
+//! * [`transcriptions`] — `transcriptions` insert + fix-up fuzzy lookup.
+//! * [`corrections`] — `(wrong → right)` learning + tombstones.
+//! * [`vocab`] — vocabulary terms feeding whisper's `initial_prompt`.
+//! * [`snippets`] — Snippets-tab CRUD.
+
+use rusqlite::Connection;
 use serde::Serialize;
 use std::path::Path;
 use std::sync::Mutex;
+
+mod corrections;
+mod migrate;
+mod profiles;
+mod snippets;
+mod transcriptions;
+mod vocab;
 
 const DB_FILENAME: &str = "typwrtr.sqlite";
 
@@ -20,7 +40,7 @@ pub struct DbHealth {
 /// a `Mutex` so we can stash this in Tauri-managed state alongside other
 /// recorder/transcriber singletons.
 pub struct Db {
-    conn: Mutex<Connection>,
+    pub(super) conn: Mutex<Connection>,
 }
 
 impl Db {
@@ -55,7 +75,7 @@ impl Db {
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .map_err(|e| e.to_string())?;
 
-        for (target, sql) in MIGRATIONS.iter() {
+        for (target, sql) in migrate::MIGRATIONS.iter() {
             if current >= *target {
                 continue;
             }
@@ -99,9 +119,6 @@ impl Db {
     }
 }
 
-/// `similar`'s `TextDiff::ratio()` over characters. Returns a value in [0.0, 1.0]
-/// that's stable enough for fuzzy "did this selection come from this transcription?"
-/// matching at the threshold (0.6) the plan calls for.
 fn count(conn: &Connection, table: &str) -> Result<i64, String> {
     // Table names cannot be parameterised, so we whitelist by matching against
     // the known set rather than interpolating arbitrary input.
@@ -119,139 +136,6 @@ fn count(conn: &Connection, table: &str) -> Result<i64, String> {
     conn.query_row(&sql, [], |row| row.get::<_, i64>(0))
         .map_err(|e| e.to_string())
 }
-
-/// Convenience: the next migration in the sequence. `MIGRATIONS` is `(version, sql)`.
-const MIGRATIONS: &[(i32, &str)] = &[
-    (1, MIGRATION_1),
-    (2, MIGRATION_2),
-    (3, MIGRATION_3),
-    (4, MIGRATION_4),
-    (5, MIGRATION_5),
-    (6, MIGRATION_6),
-];
-
-const MIGRATION_1: &str = r#"
-CREATE TABLE transcriptions (
-  id              INTEGER PRIMARY KEY AUTOINCREMENT,
-  created_at      INTEGER NOT NULL,
-  audio_path      TEXT,
-  raw_text        TEXT NOT NULL,
-  cleaned_text    TEXT NOT NULL,
-  final_text      TEXT,
-  app_bundle_id   TEXT,
-  app_title       TEXT,
-  model           TEXT NOT NULL,
-  duration_ms     INTEGER NOT NULL,
-  latency_ms      INTEGER NOT NULL,
-  source          TEXT NOT NULL
-);
-
-CREATE TABLE corrections (
-  id               INTEGER PRIMARY KEY AUTOINCREMENT,
-  transcription_id INTEGER NOT NULL REFERENCES transcriptions(id) ON DELETE CASCADE,
-  wrong            TEXT NOT NULL,
-  right            TEXT NOT NULL,
-  context          TEXT,
-  app_bundle_id    TEXT,
-  count            INTEGER NOT NULL DEFAULT 1,
-  last_seen_at     INTEGER NOT NULL
-);
-CREATE INDEX corrections_wrong_idx ON corrections(wrong);
-CREATE INDEX corrections_app_idx   ON corrections(app_bundle_id);
-
-CREATE TABLE vocabulary (
-  id            INTEGER PRIMARY KEY AUTOINCREMENT,
-  term          TEXT NOT NULL UNIQUE,
-  weight        REAL NOT NULL DEFAULT 1.0,
-  source        TEXT NOT NULL,
-  app_bundle_id TEXT,
-  created_at    INTEGER NOT NULL
-);
-CREATE INDEX vocabulary_app_idx ON vocabulary(app_bundle_id);
-
-CREATE TABLE app_profiles (
-  bundle_id        TEXT PRIMARY KEY,
-  display_name     TEXT NOT NULL,
-  prompt_template  TEXT,
-  postprocess_mode TEXT NOT NULL DEFAULT 'default',
-  preferred_model  TEXT,
-  enabled          INTEGER NOT NULL DEFAULT 1
-);
-
-CREATE TABLE snippets (
-  id          INTEGER PRIMARY KEY AUTOINCREMENT,
-  trigger     TEXT NOT NULL UNIQUE,
-  expansion   TEXT NOT NULL,
-  is_dynamic  INTEGER NOT NULL DEFAULT 0,
-  created_at  INTEGER NOT NULL
-);
-
-CREATE TABLE settings (
-  key   TEXT PRIMARY KEY,
-  value TEXT NOT NULL
-);
-"#;
-
-/// Migration 2 — Phase 2 self-learning.
-///
-/// * Adds `app_profiles.auto_apply_replacements` so the user can opt out per app.
-/// * Adds tombstones so "Forget this" prevents the same row from re-learning.
-const MIGRATION_2: &str = r#"
-ALTER TABLE app_profiles ADD COLUMN auto_apply_replacements INTEGER NOT NULL DEFAULT 1;
-
-CREATE TABLE correction_tombstones (
-  wrong         TEXT NOT NULL,
-  right         TEXT NOT NULL,
-  app_bundle_id TEXT NOT NULL DEFAULT '',
-  created_at    INTEGER NOT NULL,
-  PRIMARY KEY (wrong, right, app_bundle_id)
-);
-
-CREATE TABLE vocabulary_tombstones (
-  term       TEXT NOT NULL PRIMARY KEY,
-  created_at INTEGER NOT NULL
-);
-"#;
-
-/// Migration 3 — Phase 4 postprocess.
-///
-/// Adds `app_profiles.code_case` so the `code` postprocess mode knows whether
-/// to render `snake_case`, `camelCase`, or `kebab-case`. Default `snake`.
-const MIGRATION_3: &str = r#"
-ALTER TABLE app_profiles ADD COLUMN code_case TEXT NOT NULL DEFAULT 'snake';
-"#;
-
-/// Migration 4 — Phase 6 snippets.
-///
-/// Seeds the four defaults from the plan. `INSERT OR IGNORE` against the
-/// `trigger` UNIQUE constraint so re-running the migration on an upgraded DB
-/// won't clobber user edits, and deleted defaults won't come back.
-const MIGRATION_4: &str = r#"
-INSERT OR IGNORE INTO snippets (trigger, expansion, is_dynamic, created_at) VALUES
-  ('insert date',              '{{date}}',                                                          1, strftime('%s','now')),
-  ('insert time',              '{{time}}',                                                          1, strftime('%s','now')),
-  ('insert email signature',   'Best,' || char(10) || '[your name]',                                0, strftime('%s','now')),
-  ('insert standup template',  'Yesterday: ' || char(10) || 'Today: ' || char(10) || 'Blockers: ', 0, strftime('%s','now'));
-"#;
-
-/// Migration 5 — Phase 2 polish (auto-learn vs manual provenance).
-///
-/// Adds `corrections.source` so the Learning tab can distinguish rows that
-/// came from the manual fix-up hotkey (`'manual'`) from rows the recorder
-/// auto-learned by watching the focused app after paste (`'auto'`).
-const MIGRATION_5: &str = r#"
-ALTER TABLE corrections ADD COLUMN source TEXT NOT NULL DEFAULT 'manual';
-"#;
-
-/// Migration 6 — phonetic replacement.
-///
-/// Adds `app_profiles.phonetic_match`. When on (default), the recorder layers
-/// a Metaphone-based fuzzy pass after the exact-match replacement, so a single
-/// learned correction (e.g. `Bahb → Bob`) covers homophone variants
-/// (`Baab`, `Bawb`, `Bohb` all encode the same Metaphone key).
-const MIGRATION_6: &str = r#"
-ALTER TABLE app_profiles ADD COLUMN phonetic_match INTEGER NOT NULL DEFAULT 1;
-"#;
 
 /// Allowed values for `app_profiles.postprocess_mode`. Validated server-side
 /// before any upsert so a malformed UI payload can't poison the table.
@@ -364,713 +248,15 @@ pub struct NewTranscription<'a> {
     pub source: &'a str,
 }
 
-impl Db {
-    /// Returns one row per bundle_id ever observed (in `transcriptions` or
-    /// `app_profiles`), enriched with profile customisations and recency.
-    /// Sorted most-recently-used first; apps with no transcription history
-    /// (i.e. a profile created with no usage) sort to the bottom alphabetically.
-    pub fn list_app_profiles(&self) -> Result<Vec<AppProfileRow>, String> {
-        let conn = self.conn.lock().unwrap();
-        let sql = r#"
-            WITH all_apps AS (
-                SELECT DISTINCT app_bundle_id AS bundle_id
-                FROM transcriptions
-                WHERE app_bundle_id IS NOT NULL AND app_bundle_id != ''
-                UNION
-                SELECT bundle_id FROM app_profiles
-            )
-            SELECT
-                a.bundle_id,
-                COALESCE(
-                    p.display_name,
-                    (SELECT app_title FROM transcriptions
-                       WHERE app_bundle_id = a.bundle_id AND app_title IS NOT NULL
-                       ORDER BY id DESC LIMIT 1),
-                    a.bundle_id
-                ) AS display_name,
-                p.prompt_template,
-                COALESCE(p.postprocess_mode, 'default') AS postprocess_mode,
-                p.preferred_model,
-                COALESCE(p.enabled, 1) AS enabled,
-                COALESCE(p.auto_apply_replacements, 1) AS auto_apply_replacements,
-                COALESCE(p.phonetic_match, 1) AS phonetic_match,
-                COALESCE(p.code_case, 'snake') AS code_case,
-                (SELECT MAX(created_at) FROM transcriptions WHERE app_bundle_id = a.bundle_id) AS last_used_at,
-                (SELECT COUNT(*)        FROM transcriptions WHERE app_bundle_id = a.bundle_id) AS use_count,
-                CASE WHEN p.bundle_id IS NULL THEN 0 ELSE 1 END AS is_persisted
-            FROM all_apps a
-            LEFT JOIN app_profiles p ON p.bundle_id = a.bundle_id
-            ORDER BY (last_used_at IS NULL) ASC, last_used_at DESC, a.bundle_id ASC
-        "#;
-
-        let mut stmt = conn.prepare(sql).map_err(|e| e.to_string())?;
-        let rows = stmt
-            .query_map([], |row| {
-                Ok(AppProfileRow {
-                    bundle_id: row.get(0)?,
-                    display_name: row.get(1)?,
-                    prompt_template: row.get(2)?,
-                    postprocess_mode: row.get(3)?,
-                    preferred_model: row.get(4)?,
-                    enabled: row.get::<_, i64>(5)? != 0,
-                    auto_apply_replacements: row.get::<_, i64>(6)? != 0,
-                    phonetic_match: row.get::<_, i64>(7)? != 0,
-                    code_case: row.get(8)?,
-                    last_used_at: row.get(9)?,
-                    use_count: row.get(10)?,
-                    is_persisted: row.get::<_, i64>(11)? != 0,
-                })
-            })
-            .map_err(|e| e.to_string())?;
-
-        let mut out = Vec::new();
-        for r in rows {
-            out.push(r.map_err(|e| e.to_string())?);
-        }
-        Ok(out)
-    }
-
-    /// INSERT-OR-REPLACE one profile row. The caller must have validated
-    /// `postprocess_mode` against `POSTPROCESS_MODES`; we double-check here so
-    /// the table can't be corrupted from any path.
-    pub fn upsert_app_profile(&self, p: &AppProfileRow) -> Result<(), String> {
-        if !POSTPROCESS_MODES.contains(&p.postprocess_mode.as_str()) {
-            return Err(format!(
-                "invalid postprocess_mode '{}'; expected one of {:?}",
-                p.postprocess_mode, POSTPROCESS_MODES
-            ));
-        }
-        if !CODE_CASES.contains(&p.code_case.as_str()) {
-            return Err(format!(
-                "invalid code_case '{}'; expected one of {:?}",
-                p.code_case, CODE_CASES
-            ));
-        }
-        if p.bundle_id.trim().is_empty() {
-            return Err("bundle_id is required".to_string());
-        }
-
-        let conn = self.conn.lock().unwrap();
-        conn.execute(
-            "INSERT INTO app_profiles
-                 (bundle_id, display_name, prompt_template, postprocess_mode,
-                  preferred_model, enabled, auto_apply_replacements, phonetic_match, code_case)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
-             ON CONFLICT(bundle_id) DO UPDATE SET
-                 display_name = excluded.display_name,
-                 prompt_template = excluded.prompt_template,
-                 postprocess_mode = excluded.postprocess_mode,
-                 preferred_model = excluded.preferred_model,
-                 enabled = excluded.enabled,
-                 auto_apply_replacements = excluded.auto_apply_replacements,
-                 phonetic_match = excluded.phonetic_match,
-                 code_case = excluded.code_case",
-            params![
-                p.bundle_id,
-                p.display_name,
-                p.prompt_template,
-                p.postprocess_mode,
-                p.preferred_model,
-                if p.enabled { 1 } else { 0 },
-                if p.auto_apply_replacements { 1 } else { 0 },
-                if p.phonetic_match { 1 } else { 0 },
-                p.code_case,
-            ],
-        )
-        .map_err(|e| e.to_string())?;
-        Ok(())
-    }
-
-    /// Drop the profile row for `bundle_id`. Past transcriptions for the same
-    /// app stay; only the customisation goes away.
-    pub fn delete_app_profile(&self, bundle_id: &str) -> Result<(), String> {
-        let conn = self.conn.lock().unwrap();
-        conn.execute(
-            "DELETE FROM app_profiles WHERE bundle_id = ?1",
-            params![bundle_id],
-        )
-        .map_err(|e| e.to_string())?;
-        Ok(())
-    }
-
-    /// Resolve the profile for the current foreground app, or `None` if none
-    /// is persisted. Hot path — called once per dictation.
-    pub fn get_app_profile(&self, bundle_id: &str) -> Result<Option<AppProfileRow>, String> {
-        let conn = self.conn.lock().unwrap();
-        let sql = r#"
-            SELECT bundle_id, display_name, prompt_template,
-                   postprocess_mode, preferred_model, enabled,
-                   auto_apply_replacements, phonetic_match, code_case
-            FROM app_profiles WHERE bundle_id = ?1
-        "#;
-        let mut stmt = conn.prepare(sql).map_err(|e| e.to_string())?;
-        let mut iter = stmt
-            .query_map(params![bundle_id], |row| {
-                Ok(AppProfileRow {
-                    bundle_id: row.get(0)?,
-                    display_name: row.get(1)?,
-                    prompt_template: row.get(2)?,
-                    postprocess_mode: row.get(3)?,
-                    preferred_model: row.get(4)?,
-                    enabled: row.get::<_, i64>(5)? != 0,
-                    auto_apply_replacements: row.get::<_, i64>(6)? != 0,
-                    phonetic_match: row.get::<_, i64>(7)? != 0,
-                    code_case: row.get(8)?,
-                    last_used_at: None,
-                    use_count: 0,
-                    is_persisted: true,
-                })
-            })
-            .map_err(|e| e.to_string())?;
-        match iter.next() {
-            Some(r) => Ok(Some(r.map_err(|e| e.to_string())?)),
-            None => Ok(None),
-        }
-    }
-
-    /// Find the most recent transcription whose `cleaned_text` plausibly matches
-    /// the user's selected text. Used by the fix-up flow.
-    ///
-    /// Filters: created within `since_unix_secs`, optionally restricted to
-    /// `app_bundle_id`. Ratio threshold is applied in Rust because SQLite has
-    /// no Levenshtein UDF available; the candidate set is bounded by `LIMIT
-    /// candidate_limit` (most recent first), then we keep the best match
-    /// above `min_ratio`.
-    pub fn find_recent_match(
-        &self,
-        selection: &str,
-        app_bundle_id: Option<&str>,
-        since_unix_secs: i64,
-        candidate_limit: i64,
-        min_ratio: f64,
-    ) -> Result<Option<RecentTranscription>, String> {
-        let conn = self.conn.lock().unwrap();
-        let (sql, candidates): (&str, Vec<RecentTranscription>) = match app_bundle_id {
-            Some(_) => (
-                "SELECT id, created_at, cleaned_text, app_bundle_id
-                 FROM transcriptions
-                 WHERE created_at >= ?1
-                   AND app_bundle_id = ?2
-                 ORDER BY id DESC LIMIT ?3",
-                Vec::new(),
-            ),
-            None => (
-                "SELECT id, created_at, cleaned_text, app_bundle_id
-                 FROM transcriptions
-                 WHERE created_at >= ?1
-                 ORDER BY id DESC LIMIT ?2",
-                Vec::new(),
-            ),
-        };
-        let mut stmt = conn.prepare(sql).map_err(|e| e.to_string())?;
-        let rows: Vec<RecentTranscription> = match app_bundle_id {
-            Some(bundle) => {
-                let it = stmt
-                    .query_map(params![since_unix_secs, bundle, candidate_limit], |row| {
-                        Ok(RecentTranscription {
-                            id: row.get(0)?,
-                            created_at: row.get(1)?,
-                            cleaned_text: row.get(2)?,
-                            app_bundle_id: row.get(3)?,
-                        })
-                    })
-                    .map_err(|e| e.to_string())?;
-                let mut out = candidates;
-                for r in it {
-                    out.push(r.map_err(|e| e.to_string())?);
-                }
-                out
-            }
-            None => {
-                let it = stmt
-                    .query_map(params![since_unix_secs, candidate_limit], |row| {
-                        Ok(RecentTranscription {
-                            id: row.get(0)?,
-                            created_at: row.get(1)?,
-                            cleaned_text: row.get(2)?,
-                            app_bundle_id: row.get(3)?,
-                        })
-                    })
-                    .map_err(|e| e.to_string())?;
-                let mut out = candidates;
-                for r in it {
-                    out.push(r.map_err(|e| e.to_string())?);
-                }
-                out
-            }
-        };
-
-        let mut best: Option<(f64, RecentTranscription)> = None;
-        for cand in rows {
-            let ratio = crate::learning::similar_ratio(selection, &cand.cleaned_text);
-            if ratio >= min_ratio {
-                if best.as_ref().map(|(r, _)| ratio > *r).unwrap_or(true) {
-                    best = Some((ratio, cand));
-                }
-            }
-        }
-        Ok(best.map(|(_, t)| t))
-    }
-
-    /// Set `final_text` on a transcription. Used by the fix-up save handler.
-    pub fn set_final_text(&self, id: i64, final_text: &str) -> Result<(), String> {
-        let conn = self.conn.lock().unwrap();
-        conn.execute(
-            "UPDATE transcriptions SET final_text = ?1 WHERE id = ?2",
-            params![final_text, id],
-        )
-        .map_err(|e| e.to_string())?;
-        Ok(())
-    }
-
-    /// Insert or merge a correction. If a tombstone exists for the same
-    /// `(wrong, right, app_bundle_id)` triple, the call is a no-op so the user's
-    /// "Forget this" decision sticks across sessions. Returns the post-write
-    /// `count` (1 for fresh, n+1 after merge, 0 if tombstoned).
-    pub fn upsert_correction(
-        &self,
-        transcription_id: i64,
-        wrong: &str,
-        right: &str,
-        context: Option<&str>,
-        app_bundle_id: Option<&str>,
-        now_unix: i64,
-        source: &str,
-    ) -> Result<i64, String> {
-        let conn = self.conn.lock().unwrap();
-        let bundle_for_tombstone = app_bundle_id.unwrap_or("");
-        let tombstoned: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM correction_tombstones
-                 WHERE wrong = ?1 AND right = ?2 AND app_bundle_id = ?3",
-                params![wrong, right, bundle_for_tombstone],
-                |row| row.get(0),
-            )
-            .map_err(|e| e.to_string())?;
-        if tombstoned > 0 {
-            return Ok(0);
-        }
-
-        // Try to find an existing row to bump.
-        let existing: Option<(i64, i64)> = conn
-            .query_row(
-                "SELECT id, count FROM corrections
-                 WHERE wrong = ?1 AND right = ?2
-                   AND COALESCE(app_bundle_id, '') = COALESCE(?3, '')",
-                params![wrong, right, app_bundle_id],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .ok();
-
-        match existing {
-            Some((id, count)) => {
-                let new_count = count + 1;
-                conn.execute(
-                    "UPDATE corrections SET count = ?1, last_seen_at = ?2 WHERE id = ?3",
-                    params![new_count, now_unix, id],
-                )
-                .map_err(|e| e.to_string())?;
-                Ok(new_count)
-            }
-            None => {
-                conn.execute(
-                    "INSERT INTO corrections
-                       (transcription_id, wrong, right, context, app_bundle_id, count, last_seen_at, source)
-                     VALUES (?1, ?2, ?3, ?4, ?5, 1, ?6, ?7)",
-                    params![
-                        transcription_id,
-                        wrong,
-                        right,
-                        context,
-                        app_bundle_id,
-                        now_unix,
-                        source,
-                    ],
-                )
-                .map_err(|e| e.to_string())?;
-                Ok(1)
-            }
-        }
-    }
-
-    /// Upsert a vocabulary term with the given count-derived weight. Tombstone
-    /// suppresses re-learning a forgotten term.
-    pub fn upsert_vocabulary(
-        &self,
-        term: &str,
-        weight: f64,
-        source: &str,
-        app_bundle_id: Option<&str>,
-        now_unix: i64,
-    ) -> Result<(), String> {
-        let conn = self.conn.lock().unwrap();
-        let tombstoned: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM vocabulary_tombstones WHERE term = ?1",
-                params![term],
-                |row| row.get(0),
-            )
-            .map_err(|e| e.to_string())?;
-        if tombstoned > 0 {
-            return Ok(());
-        }
-
-        conn.execute(
-            "INSERT INTO vocabulary (term, weight, source, app_bundle_id, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5)
-             ON CONFLICT(term) DO UPDATE SET
-               weight = MAX(vocabulary.weight, excluded.weight),
-               app_bundle_id = COALESCE(vocabulary.app_bundle_id, excluded.app_bundle_id),
-               source = vocabulary.source",
-            params![term, weight, source, app_bundle_id, now_unix],
-        )
-        .map_err(|e| e.to_string())?;
-        Ok(())
-    }
-
-    /// Top vocabulary terms scoped to one app, ordered by weight descending.
-    pub fn top_vocab_for_app(
-        &self,
-        app_bundle_id: &str,
-        limit: i64,
-    ) -> Result<Vec<VocabularyRow>, String> {
-        let conn = self.conn.lock().unwrap();
-        let mut stmt = conn
-            .prepare(
-                "SELECT id, term, weight, source, app_bundle_id, created_at
-                 FROM vocabulary
-                 WHERE app_bundle_id = ?1
-                 ORDER BY weight DESC, term ASC
-                 LIMIT ?2",
-            )
-            .map_err(|e| e.to_string())?;
-        let it = stmt
-            .query_map(params![app_bundle_id, limit], |row| {
-                Ok(VocabularyRow {
-                    id: row.get(0)?,
-                    term: row.get(1)?,
-                    weight: row.get(2)?,
-                    source: row.get(3)?,
-                    app_bundle_id: row.get(4)?,
-                    created_at: row.get(5)?,
-                })
-            })
-            .map_err(|e| e.to_string())?;
-        let mut out = Vec::new();
-        for r in it {
-            out.push(r.map_err(|e| e.to_string())?);
-        }
-        Ok(out)
-    }
-
-    /// Top global vocabulary terms (those not scoped to any app).
-    pub fn top_vocab_global(&self, limit: i64) -> Result<Vec<VocabularyRow>, String> {
-        let conn = self.conn.lock().unwrap();
-        let mut stmt = conn
-            .prepare(
-                "SELECT id, term, weight, source, app_bundle_id, created_at
-                 FROM vocabulary
-                 WHERE app_bundle_id IS NULL
-                 ORDER BY weight DESC, term ASC
-                 LIMIT ?1",
-            )
-            .map_err(|e| e.to_string())?;
-        let it = stmt
-            .query_map(params![limit], |row| {
-                Ok(VocabularyRow {
-                    id: row.get(0)?,
-                    term: row.get(1)?,
-                    weight: row.get(2)?,
-                    source: row.get(3)?,
-                    app_bundle_id: row.get(4)?,
-                    created_at: row.get(5)?,
-                })
-            })
-            .map_err(|e| e.to_string())?;
-        let mut out = Vec::new();
-        for r in it {
-            out.push(r.map_err(|e| e.to_string())?);
-        }
-        Ok(out)
-    }
-
-    /// Top corrections by count for one app. Used by both the recorder (for
-    /// prompt biasing + replacement table) and the Learning tab.
-    pub fn top_corrections_for_app(
-        &self,
-        app_bundle_id: &str,
-        limit: i64,
-    ) -> Result<Vec<CorrectionRow>, String> {
-        let conn = self.conn.lock().unwrap();
-        let mut stmt = conn
-            .prepare(
-                "SELECT id, wrong, right, context, app_bundle_id, count, last_seen_at, source
-                 FROM corrections
-                 WHERE app_bundle_id = ?1
-                 ORDER BY count DESC, last_seen_at DESC
-                 LIMIT ?2",
-            )
-            .map_err(|e| e.to_string())?;
-        let it = stmt
-            .query_map(params![app_bundle_id, limit], |row| {
-                Ok(CorrectionRow {
-                    id: row.get(0)?,
-                    wrong: row.get(1)?,
-                    right: row.get(2)?,
-                    context: row.get(3)?,
-                    app_bundle_id: row.get(4)?,
-                    count: row.get(5)?,
-                    last_seen_at: row.get(6)?,
-                    source: row.get(7)?,
-                })
-            })
-            .map_err(|e| e.to_string())?;
-        let mut out = Vec::new();
-        for r in it {
-            out.push(r.map_err(|e| e.to_string())?);
-        }
-        Ok(out)
-    }
-
-    /// Top vocabulary terms across both app-scoped and global rows. Used by the
-    /// Learning tab.
-    pub fn top_vocab_combined(&self, limit: i64) -> Result<Vec<VocabularyRow>, String> {
-        let conn = self.conn.lock().unwrap();
-        let mut stmt = conn
-            .prepare(
-                "SELECT id, term, weight, source, app_bundle_id, created_at
-                 FROM vocabulary
-                 ORDER BY weight DESC, term ASC
-                 LIMIT ?1",
-            )
-            .map_err(|e| e.to_string())?;
-        let it = stmt
-            .query_map(params![limit], |row| {
-                Ok(VocabularyRow {
-                    id: row.get(0)?,
-                    term: row.get(1)?,
-                    weight: row.get(2)?,
-                    source: row.get(3)?,
-                    app_bundle_id: row.get(4)?,
-                    created_at: row.get(5)?,
-                })
-            })
-            .map_err(|e| e.to_string())?;
-        let mut out = Vec::new();
-        for r in it {
-            out.push(r.map_err(|e| e.to_string())?);
-        }
-        Ok(out)
-    }
-
-    /// Top corrections across all apps. Used by the Learning tab dashboard.
-    pub fn top_corrections_global(&self, limit: i64) -> Result<Vec<CorrectionRow>, String> {
-        let conn = self.conn.lock().unwrap();
-        let mut stmt = conn
-            .prepare(
-                "SELECT id, wrong, right, context, app_bundle_id, count, last_seen_at, source
-                 FROM corrections
-                 ORDER BY count DESC, last_seen_at DESC
-                 LIMIT ?1",
-            )
-            .map_err(|e| e.to_string())?;
-        let it = stmt
-            .query_map(params![limit], |row| {
-                Ok(CorrectionRow {
-                    id: row.get(0)?,
-                    wrong: row.get(1)?,
-                    right: row.get(2)?,
-                    context: row.get(3)?,
-                    app_bundle_id: row.get(4)?,
-                    count: row.get(5)?,
-                    last_seen_at: row.get(6)?,
-                    source: row.get(7)?,
-                })
-            })
-            .map_err(|e| e.to_string())?;
-        let mut out = Vec::new();
-        for r in it {
-            out.push(r.map_err(|e| e.to_string())?);
-        }
-        Ok(out)
-    }
-
-    /// Forget a correction row: tombstone the (wrong, right, bundle) triple
-    /// and drop the row. Future occurrences of the same delta won't re-learn.
-    pub fn forget_correction(&self, id: i64, now_unix: i64) -> Result<(), String> {
-        let conn = self.conn.lock().unwrap();
-        let row: Option<(String, String, Option<String>)> = conn
-            .query_row(
-                "SELECT wrong, right, app_bundle_id FROM corrections WHERE id = ?1",
-                params![id],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-            )
-            .ok();
-        let Some((wrong, right, bundle)) = row else {
-            return Ok(());
-        };
-        let bundle_for_tombstone = bundle.as_deref().unwrap_or("");
-        conn.execute(
-            "INSERT OR IGNORE INTO correction_tombstones
-               (wrong, right, app_bundle_id, created_at)
-             VALUES (?1, ?2, ?3, ?4)",
-            params![wrong, right, bundle_for_tombstone, now_unix],
-        )
-        .map_err(|e| e.to_string())?;
-        conn.execute("DELETE FROM corrections WHERE id = ?1", params![id])
-            .map_err(|e| e.to_string())?;
-        Ok(())
-    }
-
-    /// Forget a vocabulary term: tombstone it and drop the row.
-    pub fn forget_vocabulary(&self, id: i64, now_unix: i64) -> Result<(), String> {
-        let conn = self.conn.lock().unwrap();
-        let term: Option<String> = conn
-            .query_row(
-                "SELECT term FROM vocabulary WHERE id = ?1",
-                params![id],
-                |r| r.get(0),
-            )
-            .ok();
-        let Some(term) = term else {
-            return Ok(());
-        };
-        conn.execute(
-            "INSERT OR IGNORE INTO vocabulary_tombstones (term, created_at) VALUES (?1, ?2)",
-            params![term, now_unix],
-        )
-        .map_err(|e| e.to_string())?;
-        conn.execute("DELETE FROM vocabulary WHERE id = ?1", params![id])
-            .map_err(|e| e.to_string())?;
-        Ok(())
-    }
-
-    /// All snippets ordered by trigger A→Z. The Snippets tab consumes this
-    /// directly; the recorder also pulls it on every dictation to drive
-    /// inline expansion (caching is left for later if it bites).
-    pub fn list_snippets(&self) -> Result<Vec<SnippetRow>, String> {
-        let conn = self.conn.lock().unwrap();
-        let mut stmt = conn
-            .prepare(
-                "SELECT id, trigger, expansion, is_dynamic, created_at
-                 FROM snippets ORDER BY trigger COLLATE NOCASE ASC",
-            )
-            .map_err(|e| e.to_string())?;
-        let it = stmt
-            .query_map([], |row| {
-                Ok(SnippetRow {
-                    id: row.get(0)?,
-                    trigger: row.get(1)?,
-                    expansion: row.get(2)?,
-                    is_dynamic: row.get::<_, i64>(3)? != 0,
-                    created_at: row.get(4)?,
-                })
-            })
-            .map_err(|e| e.to_string())?;
-        let mut out = Vec::new();
-        for r in it {
-            out.push(r.map_err(|e| e.to_string())?);
-        }
-        Ok(out)
-    }
-
-    /// Insert or update a snippet. `trigger` is normalised (lowercased, trimmed)
-    /// so the recorder's case-insensitive match always finds the row.
-    pub fn upsert_snippet(&self, s: &SnippetRow, now_unix: i64) -> Result<i64, String> {
-        let trigger = s.trigger.trim().to_lowercase();
-        if trigger.is_empty() {
-            return Err("Snippet trigger cannot be empty".to_string());
-        }
-        if s.expansion.is_empty() {
-            return Err("Snippet expansion cannot be empty".to_string());
-        }
-
-        let conn = self.conn.lock().unwrap();
-        if s.id > 0 {
-            // Update existing — guard the trigger uniqueness ourselves so the
-            // user gets a friendly error instead of a SQLite constraint dump.
-            let conflict: Option<i64> = conn
-                .query_row(
-                    "SELECT id FROM snippets WHERE trigger = ?1 AND id != ?2",
-                    params![trigger, s.id],
-                    |row| row.get(0),
-                )
-                .ok();
-            if conflict.is_some() {
-                return Err(format!(
-                    "Another snippet already uses the trigger '{}'",
-                    trigger
-                ));
-            }
-            conn.execute(
-                "UPDATE snippets SET trigger = ?1, expansion = ?2, is_dynamic = ?3 WHERE id = ?4",
-                params![trigger, s.expansion, if s.is_dynamic { 1 } else { 0 }, s.id],
-            )
-            .map_err(|e| e.to_string())?;
-            Ok(s.id)
-        } else {
-            conn.execute(
-                "INSERT INTO snippets (trigger, expansion, is_dynamic, created_at)
-                 VALUES (?1, ?2, ?3, ?4)",
-                params![
-                    trigger,
-                    s.expansion,
-                    if s.is_dynamic { 1 } else { 0 },
-                    now_unix,
-                ],
-            )
-            .map_err(|e| {
-                if e.to_string().contains("UNIQUE") {
-                    format!("A snippet with trigger '{}' already exists", trigger)
-                } else {
-                    e.to_string()
-                }
-            })?;
-            Ok(conn.last_insert_rowid())
-        }
-    }
-
-    pub fn delete_snippet(&self, id: i64) -> Result<(), String> {
-        let conn = self.conn.lock().unwrap();
-        conn.execute("DELETE FROM snippets WHERE id = ?1", params![id])
-            .map_err(|e| e.to_string())?;
-        Ok(())
-    }
-
-    pub fn insert_transcription(&self, t: NewTranscription) -> Result<i64, String> {
-        let conn = self.conn.lock().unwrap();
-        conn.execute(
-            "INSERT INTO transcriptions
-             (created_at, audio_path, raw_text, cleaned_text, app_bundle_id,
-              app_title, model, duration_ms, latency_ms, source)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
-            params![
-                t.created_at,
-                t.audio_path.and_then(|p| p.to_str()),
-                t.raw_text,
-                t.cleaned_text,
-                t.app_bundle_id,
-                t.app_title,
-                t.model,
-                t.duration_ms,
-                t.latency_ms,
-                t.source,
-            ],
-        )
-        .map_err(|e| e.to_string())?;
-        Ok(conn.last_insert_rowid())
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::db::migrate::MIGRATIONS;
 
     fn fresh_db() -> Db {
         let path = std::env::temp_dir().join(format!(
             "typwrtr_test_{}_{}.sqlite",
             std::process::id(),
-            // bump per-test to avoid WAL collisions when tests run in parallel
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
@@ -1107,7 +293,6 @@ mod tests {
         assert_eq!(h.corrections, 0);
         assert_eq!(h.vocabulary, 0);
         assert_eq!(h.app_profiles, 0);
-        // Migration 4 seeds the four default snippets from the plan.
         assert_eq!(h.snippets, 4);
     }
 
@@ -1184,7 +369,6 @@ mod tests {
     #[test]
     fn list_app_profiles_includes_unpersisted_apps_from_history() {
         let db = fresh_db();
-        // No profile row for "slack", but a transcription exists.
         db.insert_transcription(NewTranscription {
             created_at: 50,
             audio_path: None,
@@ -1198,7 +382,6 @@ mod tests {
             source: "local",
         })
         .unwrap();
-        // Persisted profile for "code" with no transcription history.
         db.upsert_app_profile(&AppProfileRow {
             bundle_id: "code".into(),
             display_name: "VS Code".into(),
@@ -1217,11 +400,9 @@ mod tests {
 
         let rows = db.list_app_profiles().unwrap();
         assert_eq!(rows.len(), 2);
-        // Slack has history, sorts first.
         assert_eq!(rows[0].bundle_id, "slack");
         assert_eq!(rows[0].use_count, 1);
         assert!(!rows[0].is_persisted);
-        // Code has a profile but no usage; sorts to the bottom.
         assert_eq!(rows[1].bundle_id, "code");
         assert_eq!(rows[1].use_count, 0);
         assert!(rows[1].is_persisted);
@@ -1259,9 +440,7 @@ mod tests {
         })
         .unwrap();
         db.delete_app_profile("slack").unwrap();
-        // Profile gone …
         assert!(db.get_app_profile("slack").unwrap().is_none());
-        // … but the transcription row is still there, listed from history.
         let rows = db.list_app_profiles().unwrap();
         assert_eq!(rows.len(), 1);
         assert!(!rows[0].is_persisted);
@@ -1315,7 +494,6 @@ mod tests {
     #[test]
     fn delete_snippet_removes_row() {
         let db = fresh_db();
-        // The seed includes 'insert date'; delete it and confirm it's gone.
         let id = db
             .list_snippets()
             .unwrap()
@@ -1384,9 +562,7 @@ mod tests {
         assert_eq!(row.len(), 1);
         let cid = row[0].id;
         db.forget_correction(cid, 200).unwrap();
-        // Row gone.
         assert!(db.top_corrections_for_app("code", 10).unwrap().is_empty());
-        // Re-learn attempt is suppressed.
         let count_after = db
             .upsert_correction(tid, "rust SQL light", "rusqlite", None, Some("code"), 300, "manual")
             .unwrap();

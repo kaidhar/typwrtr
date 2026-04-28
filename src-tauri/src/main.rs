@@ -9,7 +9,7 @@ use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
 
 use typwrtr_lib::audio;
 use typwrtr_lib::context;
-use typwrtr_lib::copy;
+use typwrtr_lib::clipboard::copy;
 use typwrtr_lib::db::{
     AppProfileRow, CorrectionRow, Db, DbHealth, RecentTranscription, SnippetRow, VocabularyRow,
 };
@@ -780,25 +780,38 @@ fn main() {
 
             transcribe_local::log_compiled_backend();
 
+            // Hygiene log: the prior on-device T5 grammar corrector wrote
+            // ~240 MB of model files into <app_dir>/grammar-corrector/. The
+            // corrector is gone (replaced by deterministic post-processing
+            // in cleanup/scrub.rs); flag the directory once at startup so
+            // the user knows they can reclaim the disk space.
+            {
+                let dir = state.app_dir.join("grammar-corrector");
+                if dir.exists() {
+                    println!(
+                        "[typwrtr] grammar-corrector model files at {} are no longer used and can be deleted",
+                        dir.display()
+                    );
+                }
+            }
+
             // Pre-warm the whisper model so the first dictation doesn't pay load cost.
             let prewarm_settings = state.settings.lock().unwrap().clone();
-            if prewarm_settings.engine == "local" {
-                let model_root = model_storage_dir(&prewarm_settings, &state.app_dir);
-                let model_path = model_root.join(transcribe_local::model_filename(
-                    &prewarm_settings.whisper_model,
-                ));
-                let local = state.recorder.local_transcriber();
-                std::thread::spawn(move || {
-                    if model_path.exists() {
-                        match local.ensure_loaded(&model_path) {
-                            Ok(_) => println!("[typwrtr] Whisper model pre-warmed"),
-                            Err(e) => eprintln!("[typwrtr] Pre-warm failed: {}", e),
-                        }
-                    } else {
-                        println!("[typwrtr] Skipping pre-warm: model not downloaded yet");
+            let model_root = model_storage_dir(&prewarm_settings, &state.app_dir);
+            let model_path = model_root.join(transcribe_local::model_filename(
+                &prewarm_settings.whisper_model,
+            ));
+            let local = state.recorder.local_transcriber();
+            std::thread::spawn(move || {
+                if model_path.exists() {
+                    match local.ensure_loaded(&model_path) {
+                        Ok(_) => println!("[typwrtr] Whisper model pre-warmed"),
+                        Err(e) => eprintln!("[typwrtr] Pre-warm failed: {}", e),
                     }
-                });
-            }
+                } else {
+                    println!("[typwrtr] Skipping pre-warm: model not downloaded yet");
+                }
+            });
 
             Ok(())
         })

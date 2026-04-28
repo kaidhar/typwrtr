@@ -1,21 +1,15 @@
 pub mod audio;
 pub mod cleanup;
+pub mod clipboard;
 pub mod commands;
 pub mod context;
-pub mod copy;
 pub mod db;
 pub mod downloader;
-pub mod focused_text;
 pub mod learning;
-pub mod llm_cleanup;
-pub mod paste;
-pub mod postprocess;
 pub mod recorder;
 pub mod settings;
 pub mod streaming;
-pub mod transcribe_groq;
 pub mod transcribe_local;
-pub mod vad;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {

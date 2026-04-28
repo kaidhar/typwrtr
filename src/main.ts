@@ -5,9 +5,7 @@ import { open as openDialog } from "@tauri-apps/plugin-dialog";
 
 interface Settings {
   microphone: string;
-  engine: string;
   whisperModel: string;
-  groqApiKey: string;
   modelDir: string;
   toggleHotkey: string;
   pushToTalkHotkey: string;
@@ -16,8 +14,6 @@ interface Settings {
   saveTranscriptions: boolean;
   keepAudioClips: boolean;
   fixupHotkey: string;
-  llmCleanup: string;
-  llmCleanupModel: string;
   streamingCaptions: boolean;
   vadSilenceMs: number;
 }
@@ -111,12 +107,7 @@ interface DownloadProgress {
 const statusDot = document.getElementById("status-dot")!;
 const statusText = document.getElementById("status-text")!;
 const micSelect = document.getElementById("mic-select") as HTMLSelectElement;
-const engineLocal = document.getElementById("engine-local")!;
-const engineCloud = document.getElementById("engine-cloud")!;
-const localSettings = document.getElementById("local-settings")!;
-const cloudSettings = document.getElementById("cloud-settings")!;
 const modelSelect = document.getElementById("model-select") as HTMLSelectElement;
-const modelDirSettings = document.getElementById("model-dir-settings")!;
 const modelDirInput = document.getElementById("model-dir") as HTMLInputElement;
 const resetModelDirBtn = document.getElementById("reset-model-dir")!;
 const selectModelDirBtn = document.getElementById("select-model-dir")!;
@@ -124,15 +115,12 @@ const downloadBtn = document.getElementById("download-btn")!;
 const downloadProgress = document.getElementById("download-progress")!;
 const progressText = document.getElementById("progress-text")!;
 const progressFill = document.getElementById("progress-fill")!;
-const groqKey = document.getElementById("groq-key") as HTMLInputElement;
 const toggleHotkeyText = document.getElementById("toggle-hotkey-text")!;
 const pttHotkeyText = document.getElementById("ptt-hotkey-text")!;
 const toggleHotkeySet = document.getElementById("toggle-hotkey-set")!;
 const pttHotkeySet = document.getElementById("ptt-hotkey-set")!;
 const fixupHotkeyText = document.getElementById("fixup-hotkey-text")!;
 const fixupHotkeySet = document.getElementById("fixup-hotkey-set")!;
-const llmCleanupSelect = document.getElementById("llm-cleanup-select") as HTMLSelectElement;
-const llmCleanupModelSelect = document.getElementById("llm-cleanup-model-select") as HTMLSelectElement;
 const streamingCaptionsToggle = document.getElementById("streaming-captions") as HTMLInputElement;
 const vadSilenceInput = document.getElementById("vad-silence-ms") as HTMLInputElement;
 const hotkeyCaptureStatus = document.getElementById("hotkey-capture-status")!;
@@ -362,21 +350,11 @@ async function loadSettings() {
   });
   micSelect.value = currentSettings.microphone;
 
-  // Engine
-  setEngine(currentSettings.engine);
-
   // Model
   currentSettings.whisperModel = ensureValidModelSelection(currentSettings.whisperModel);
   modelSelect.value = currentSettings.whisperModel;
   await checkModelStatus();
   await renderModelDirField();
-
-  // Groq key
-  groqKey.value = currentSettings.groqApiKey;
-
-  // LLM cleanup
-  llmCleanupSelect.value = currentSettings.llmCleanup ?? "off";
-  llmCleanupModelSelect.value = currentSettings.llmCleanupModel ?? "quality";
 
   // Streaming captions + VAD
   streamingCaptionsToggle.checked = currentSettings.streamingCaptions ?? false;
@@ -849,15 +827,6 @@ async function refreshAppProfiles() {
   }
 }
 
-function setEngine(engine: string) {
-  currentSettings.engine = engine;
-  engineLocal.classList.toggle("active", engine === "local");
-  engineCloud.classList.toggle("active", engine === "cloud");
-  localSettings.classList.toggle("hidden", engine !== "local");
-  modelDirSettings.classList.toggle("hidden", engine !== "local");
-  cloudSettings.classList.toggle("hidden", engine !== "cloud");
-}
-
 async function checkModelStatus() {
   const downloaded = await invoke<boolean>("check_model_downloaded", {
     modelSize: modelSelect.value,
@@ -900,14 +869,11 @@ function formatDownloadProgress(downloaded: number, total: number, percent: numb
 async function saveSettings() {
   currentSettings.microphone = micSelect.value;
   currentSettings.whisperModel = modelSelect.value;
-  currentSettings.groqApiKey = groqKey.value;
   // currentSettings.modelDir is the source of truth — Select Folder / Reset
   // mutate it directly. The input is read-only and just shows the resolved
   // path (override or default), so we deliberately don't read it back here.
   currentSettings.saveTranscriptions = saveTranscriptionsToggle.checked;
   currentSettings.keepAudioClips = keepAudioClipsToggle.checked;
-  currentSettings.llmCleanup = llmCleanupSelect.value;
-  currentSettings.llmCleanupModel = llmCleanupModelSelect.value;
   currentSettings.streamingCaptions = streamingCaptionsToggle.checked;
   const parsedVad = Math.max(0, Math.min(2000, Math.round(Number(vadSilenceInput.value) || 0)));
   currentSettings.vadSilenceMs = parsedVad;
@@ -929,14 +895,6 @@ saveTranscriptionsToggle.addEventListener("change", () => {
 });
 
 keepAudioClipsToggle.addEventListener("change", () => {
-  void saveSettings().catch((error) => console.error("Failed to save settings:", error));
-});
-
-llmCleanupSelect.addEventListener("change", () => {
-  void saveSettings().catch((error) => console.error("Failed to save settings:", error));
-});
-
-llmCleanupModelSelect.addEventListener("change", () => {
   void saveSettings().catch((error) => console.error("Failed to save settings:", error));
 });
 
@@ -1027,16 +985,6 @@ void listen<string>("toast", (ev) => {
 });
 
 // Event listeners
-engineLocal.addEventListener("click", () => {
-  setEngine("local");
-  void saveSettings().catch((error) => console.error("Failed to save settings:", error));
-});
-
-engineCloud.addEventListener("click", () => {
-  setEngine("cloud");
-  void saveSettings().catch((error) => console.error("Failed to save settings:", error));
-});
-
 micSelect.addEventListener("change", () => {
   void saveSettings().catch((error) => console.error("Failed to save settings:", error));
 });
@@ -1071,10 +1019,6 @@ downloadBtn.addEventListener("click", async () => {
       progressFill.classList.remove("indeterminate");
     }, 600);
   }
-});
-
-groqKey.addEventListener("change", () => {
-  void saveSettings().catch((error) => console.error("Failed to save settings:", error));
 });
 
 selectModelDirBtn.addEventListener("click", async () => {

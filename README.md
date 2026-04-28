@@ -5,7 +5,7 @@
 </p>
 
 <p align="center">
-  <strong>Speak anywhere. Transcribe locally or in the cloud. Paste into the app you are already using.</strong>
+  <strong>Speak anywhere. Transcribe locally. Paste into the app you are already using.</strong>
 </p>
 
 <p align="center">
@@ -14,7 +14,6 @@
   <img alt="TypeScript" src="https://img.shields.io/badge/TypeScript-frontend-3178C6?logo=typescript&logoColor=white">
   <img alt="whisper-rs" src="https://img.shields.io/badge/whisper--rs-0.16-0E8F6D">
   <img alt="CUDA / Metal" src="https://img.shields.io/badge/CUDA%20%7C%20Metal-GPU-76B900">
-  <img alt="Groq" src="https://img.shields.io/badge/Groq-cloud-F55036">
   <img alt="Windows and macOS" src="https://img.shields.io/badge/Windows%20%7C%20macOS-supported-111827">
 </p>
 
@@ -22,19 +21,20 @@
   <img src="src/assets/typwrtr-screenshot.png" alt="typwrtr app screenshot" width="760" />
 </p>
 
-`typwrtr` is a cross-platform desktop dictation app built with Tauri. It records microphone audio from a global hotkey, transcribes speech with either an in-process `whisper.cpp` (via the `whisper-rs` crate) or Groq Cloud, runs a self-learning loop to fix recurring mistakes, and pastes the cleaned-up text into the currently focused app.
+`typwrtr` is a cross-platform desktop dictation app built with Tauri. It records microphone audio from a global hotkey, transcribes speech with in-process `whisper.cpp` (via the `whisper-rs` crate, GPU-accelerated), runs a self-learning loop to fix recurring mistakes, and pastes the cleaned-up text into the currently focused app. Everything runs locally — no audio, transcripts, or text ever leaves the machine.
 
 > Building this on your own laptop? Start with [docs/skill.md](docs/skill.md). It tells you which setup path to use for your OS, CPU, GPU, and model choice.
 
 ## Why It Matters
 
 - Dictate into any focused app instead of typing manually.
-- Use **local Whisper** when privacy and offline transcription matter — model lives in-process, no shell sidecar, GPU-accelerated where available.
-- Use **Groq Cloud** when you want the fastest setup with fewer native build steps.
-- Self-learning: correct a transcription once with a hotkey and typwrtr biases future inferences toward your jargon, names, and homophones.
+- **Fully local pipeline.** Whisper transcribes on-device via `whisper.cpp` (no shell sidecar, GPU-accelerated where available). No cloud, no API keys, no daemons — every byte stays on the machine.
+- Self-learning: correct a transcription once with a hotkey and typwrtr biases future inferences toward your jargon, names, and homophones. Replacement table fires at `count ≥ 1` — one fix is enough.
+- **Lever pass for accuracy** — beam search (`beam_size=5`), hallucination guards (`no_speech_thold=0.3`, `suppress_nst=true`), and per-app phonetic-match replacements via Metaphone catch homophones learned once and never seen again.
+- **Deterministic post-processing.** Two cheap rule-based passes run after every dictation: `collapse_repeats` ("i i want" → "I want") and `scrub_hallucinations` (kills canonical Whisper artifacts like "Thanks for watching."). Replaces the prior on-device T5 grammar corrector — same residual value, zero latency, no 240 MB download.
+- **Clipboard-safe paste.** Whatever you had on the clipboard before dictating is restored after the synthesised paste, with no observable latency on the dictation hot path.
 - Per-app profiles: VS Code gets the technical-vocabulary prompt; Slack gets default; both stay out of each other's way.
 - Voice commands inline (`new line`, `period`, `cap that`, `code mode`, `clipboard instead`).
-- Postprocess + optional LLM cleanup pass.
 - Always-on-top heartbeat overlay: hover for status animation, click to start/stop recording.
 - Streaming captions overlay during recording (opt-in).
 - Snippets with `{{date}}` / `{{clipboard}}` / `{{selection}}` templating.
@@ -45,9 +45,11 @@
 | Your machine | Recommended path | Start with |
 | --- | --- | --- |
 | Windows + NVIDIA GPU | Local Whisper with `cuda` feature | `medium.en`, then `large-v3-turbo` |
-| Windows CPU-only | Groq Cloud or CPU local | Groq Cloud or `small.en` |
+| Windows CPU-only | Local Whisper, CPU build | `small.en` |
 | macOS Apple Silicon | Local Whisper with `metal` feature (default) | `medium.en` |
-| macOS Intel | Groq Cloud or CPU local | Groq Cloud or `small.en` |
+| macOS Intel | Local Whisper, CPU build | `small.en` |
+
+No external daemons or LLM downloads required — the post-transcription cleanup runs as a pair of deterministic Rust passes inside the recorder.
 
 For the full machine-specific build flow, use the reusable setup skill: [docs/skill.md](docs/skill.md).
 
@@ -85,12 +87,10 @@ First clean build compiles `whisper.cpp` + GGML + CUDA/Metal kernels in-process;
 ## First Launch
 
 1. Pick your microphone.
-2. Choose `Local Whisper` or `Groq Cloud`.
-3. For `Groq Cloud`, paste your API key — it is stored in the OS keychain, never on disk.
-4. For `Local Whisper`, download a model from the app. The model lives at `Settings → Engine → Model folder` (defaults to the app config directory; click **Select folder** to override).
-5. Press a hotkey, or click the heartbeat overlay at the bottom-center of the screen, and speak into any app where text can be pasted.
+2. Download a Whisper model from the app. The model lives at `Settings → Engine → Model folder` (defaults to the app config directory; click **Select folder** to override).
+3. Press a hotkey, or click the heartbeat overlay at the bottom-center of the screen, and speak into any app where text can be pasted.
 
-Settings (minus the keyed Groq token) live under the app config directory:
+Settings live under the app config directory:
 
 | OS | App data path |
 | --- | --- |
@@ -124,9 +124,12 @@ Click the overlay to use the same toggle flow as the global hotkey: click once t
 For each dictation:
 
 ```
-mic capture → resample to 16 kHz mono → whisper-rs (persistent context, GPU)
-  → cleanup_text → replacement table → voice commands
-  → postprocess mode → optional LLM cleanup → paste / clipboard
+mic capture → resample to 16 kHz mono → whisper-rs (persistent context, GPU,
+                                                    beam=5, no_speech_thold=0.3,
+                                                    suppress_nst=true)
+  → cleanup_text → replacement table (literal + Metaphone phonetic) → voice commands
+  → postprocess mode → collapse_repeats + scrub_hallucinations → snapshot prior clipboard
+  → set clipboard → synthesised paste → restore prior clipboard (120 ms detached)
   → DB log (transcription, app context, latency)
 ```
 
@@ -174,7 +177,7 @@ For automatic and manual corrections, the diff pipeline extracts (wrong → righ
 
 On future dictations:
 - Top-20 per-app vocab + top-10 global vocab + top-10 per-app correction targets are appended to whisper's `initial_prompt` (deduped, capped at ≈800 chars to stay under whisper's ~224-token budget).
-- Pairs with `count ≥ 3` fire the **replacement table** — case-insensitive, word-boundary safe, gated by a context check, applied pre-paste.
+- Pairs with `count ≥ 1` fire the **replacement table** — case-insensitive, word-boundary safe, gated by a context check, applied pre-paste. One learned correction is enough; the threshold used to be `≥ 3` and was lowered once the tombstone path made false positives recoverable.
 
 Learning data is local SQLite (`<app_dir>/typwrtr.sqlite`). The Learning tab shows top corrections and vocabulary with per-row **Forget** that tombstones the entry so it does not re-learn. **Clear all learning data** wipes the DB and the audio retention dir.
 
@@ -213,7 +216,7 @@ Speak any of these and the recorder rewrites the transcript before paste:
 
 Acceptance test from the spec: `"Hey team comma new line we shipped the new build period"` → `"Hey team,\nwe shipped the new build."`.
 
-## Postprocess + optional LLM cleanup
+## Postprocess + deterministic scrub
 
 After voice commands, the text passes through the per-app postprocess mode:
 
@@ -222,11 +225,12 @@ After voice commands, the text passes through the per-app postprocess mode:
 - **markdown** — preserve list markers from `bullet list` voice command.
 - **code** — only fires when `code mode` was said in the same utterance; transforms text into a single identifier in the profile's case style.
 
-Optional LLM cleanup pass runs last (`Settings → Engine → LLM cleanup pass`):
+Two deterministic scrub passes run last, on every dictation:
 
-- **Off** (default).
-- **Groq** — Llama-3.1-8B-instant via Groq with a fixed system prompt: *"Fix only punctuation, capitalization, and obvious dictation errors. Do not rephrase. Preserve all proper nouns and code-like tokens exactly."* — wrapped in an 800 ms timeout; identity fallback on Off / timeout / error.
-- **Local** — deferred (would stage a `llama.cpp` sidecar; not shipped).
+- **`collapse_repeats`** — collapses case-insensitive immediate word repeats (`i i want` → `I want`, `the the cat` → `the cat`). Tokenization is whitespace-only; punctuation between repeats blocks the collapse, so deliberate `cat, cat` survives.
+- **`scrub_hallucinations`** — Aho-Corasick whole-line / trailing match against a small bag of canonical Whisper hallucinations (`Thanks for watching.`, `Subtitles by the Amara.org community`, standalone `[Music]` / `♪` lines). Mid-sentence matches are left alone so users can dictate the phrase intentionally.
+
+Both run unconditionally, in O(n), and replace an earlier on-device T5 grammar corrector that cost 3–5 s on CPU per dictation. The corrector's residual value (verb tense, subject-verb agreement) was rare in deliberate single-speaker dictation; the cheap rules cover the actually-observed wins (repeats, canonical hallucinations) at zero runtime cost. A one-shot `Settings::load` migration strips the legacy `grammarCorrection` / `grammarSkipAboveLogprob` keys from existing `config.json` files on next launch.
 
 ## Streaming captions + VAD auto-stop
 
@@ -256,7 +260,9 @@ Four defaults seed on first run: `insert date`, `insert time`, `insert email sig
 
 ## Privacy
 
-- **Groq API key** lives in the OS keychain (`com.typwrtr.app` / `groq_api_key`). On migration from older configs, the plaintext is moved into the keychain and scrubbed from disk.
+- **No network egress in the dictation hot path.** Whisper transcription runs in-process; cleanup is deterministic Rust. No audio, transcripts, or cleanup prompts ever leave the machine.
+- **No API keys, no daemons.** Earlier iterations shipped a cloud Groq path (later replaced by a self-hosted Ollama backend, then by an on-device T5 grammar corrector). All three are gone — the only thing that talks to the network is the model-download flow when you first fetch a Whisper `ggml-*.bin`. Existing `config.json` files carrying any of those legacy keys auto-migrate on first load.
+- **Clipboard hygiene.** Whatever you had on the clipboard before dictating is restored ~120 ms after the synthesised paste, so dictation does not silently overwrite the URL/snippet you copied earlier.
 - **Audio retention** is off by default. When on, WAVs land in `<app_dir>/audio/<unix_ms>.wav`; **Clear all learning data** removes the directory along with the DB rows.
 - **Save transcriptions** can be turned off — the recorder runs end-to-end without writing to the learning DB.
 - **Per-app learning disable** — flip a profile's Learning switch off and that app contributes nothing to the DB or to prompt biasing.
@@ -266,7 +272,7 @@ Four defaults seed on first run: `insert date`, `insert time`, `insert email sig
 - **First clean build** is slow (`whisper-rs-sys` compiles `whisper.cpp` + GGML + CUDA/Metal kernels). Plan for ~5–10 min cold; incrementals are seconds.
 - **`LIBCLANG_PATH` is required** at build time (bindgen). Without it, `whisper-rs-sys` fails with *"Unable to find libclang"*.
 - **No `whisper.cpp` sibling checkout** is needed any more — `whisper-rs-sys` vendors its own copy. Old `../whisper.cpp` directories from earlier setups are unused.
-- **Database** lives at `<app_dir>/typwrtr.sqlite` (WAL mode). Migrations run on every startup; current schema version: 4.
+- **Database** lives at `<app_dir>/typwrtr.sqlite` (WAL mode). Migrations run on every startup; current schema version: 6 (adds `app_profiles.phonetic_match`).
 
 ## Generated Files
 
@@ -294,7 +300,7 @@ Rust:
 ```powershell
 cd src-tauri
 cargo check
-cargo test --lib         # 90+ unit tests
+cargo test --lib         # 116 unit tests
 ```
 
 Run a one-off transcription via the dev console (with `withGlobalTauri` on):
@@ -309,7 +315,7 @@ await window.__TAURI__.core.invoke("toggle_recording");
 
 - Setting up typwrtr on a new laptop.
 - Helping someone else build it on different hardware.
-- Choosing between local Whisper and Groq Cloud.
+- Picking a Whisper model size for your CPU/GPU.
 - Deciding whether to use CPU, NVIDIA CUDA, or Apple Silicon Metal.
 - Troubleshooting `LIBCLANG_PATH`, model load, or hotkey issues.
 

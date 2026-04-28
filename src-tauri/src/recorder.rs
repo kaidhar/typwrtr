@@ -3,19 +3,18 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Emitter, Manager};
 
-use crate::audio::{self, AudioRecorder, WHISPER_SAMPLE_RATE};
-use crate::cleanup::cleanup_text;
+use crate::audio::capture::{self as audio, AudioRecorder, WHISPER_SAMPLE_RATE};
+use crate::cleanup;
+use crate::cleanup::postprocess::{self, CodeCase, Mode};
+use crate::cleanup::text::cleanup_text;
+use crate::clipboard::paste::paste_text;
 use crate::commands::{apply_voice_commands_with_snippets, Snippet};
 use crate::context;
 use crate::db::{Db, NewTranscription};
-use crate::focused_text;
+use crate::learning::focused_text;
 use crate::learning::{apply_correction_pairs, similar_ratio};
-use crate::llm_cleanup::{cleanup as llm_cleanup, CleanupBackend, CleanupModel};
-use crate::paste::paste_text;
-use crate::postprocess::{self, CodeCase, Mode};
 use crate::settings::Settings;
 use crate::streaming::{self, StreamingConfig, StreamingHandle};
-use crate::transcribe_groq;
 use crate::transcribe_local::{self, LocalTranscriber, TranscribeOptions};
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
@@ -212,33 +211,21 @@ impl Recorder {
             .unwrap_or(settings.whisper_model.as_str())
             .to_string();
 
-        let raw_text = match settings.engine.as_str() {
-            "local" => {
-                let model_path = model_dir.join(transcribe_local::model_filename(&effective_model));
-                let opts = TranscribeOptions {
-                    language: settings.language.clone(),
-                    initial_prompt: effective_prompt.clone(),
-                    ..TranscribeOptions::default()
-                };
-                self.local.transcribe(&model_path, samples, opts).await?
-            }
-            "cloud" => {
-                let wav = audio::encode_wav_16k_mono(&samples)?;
-                transcribe_groq::transcribe_groq(
-                    &settings.groq_api_key,
-                    wav,
-                    &settings.language,
-                    &effective_prompt,
-                )
-                .await?
-            }
-            _ => return Err(format!("Unknown engine: {}", settings.engine)),
+        let (raw_text, avg_logprob) = {
+            let model_path = model_dir.join(transcribe_local::model_filename(&effective_model));
+            let opts = TranscribeOptions {
+                language: settings.language.clone(),
+                initial_prompt: effective_prompt.clone(),
+                ..TranscribeOptions::default()
+            };
+            let res = self.local.transcribe(&model_path, samples, opts).await?;
+            (res.text, res.avg_logprob)
         };
 
         let mut cleaned = cleanup_text(&raw_text);
 
         // Phase 2 §2.4 replacement table — apply learned (wrong → right) pairs
-        // with `count >= 3`, scoped to this app, when the profile permits it.
+        // with `count >= 1`, scoped to this app, when the profile permits it.
         // Phonetic pass (post-exact) catches homophone variants so one
         // `Bahb → Bob` correction also covers `Baab`, `Bawb`, `Bohb` etc.
         let auto_apply = profile.map(|p| p.auto_apply_replacements).unwrap_or(true);
@@ -274,7 +261,7 @@ impl Recorder {
             .iter()
             .any(|s| s.is_dynamic && s.expansion.contains("{{selection}}"));
         let preloaded_selection = if needs_selection {
-            tokio::task::spawn_blocking(crate::copy::capture_selection)
+            tokio::task::spawn_blocking(crate::clipboard::copy::capture_selection)
                 .await
                 .ok()
                 .and_then(|r| r.ok())
@@ -308,19 +295,17 @@ impl Recorder {
             .unwrap_or(CodeCase::Snake);
         cleaned = postprocess::apply(&cleaned, pp_mode, cmd_result.code_mode, pp_case);
 
-        // Phase 4.2 optional LLM cleanup — final pass, time-budgeted.
-        let backend = CleanupBackend::from_str(&settings.llm_cleanup);
-        if backend != CleanupBackend::Off && !cleaned.is_empty() {
-            let model = CleanupModel::from_str(&settings.llm_cleanup_model);
-            cleaned = llm_cleanup(
-                backend,
-                &settings.groq_api_key,
-                &cleaned,
-                Duration::from_millis(800),
-                model,
-            )
-            .await;
+        // Deterministic post-processing — collapse adjacent word repeats
+        // (`i i want` → `i want`) and strip canonical Whisper hallucinations
+        // ("Thanks for watching."). Replaces the prior on-device T5 grammar
+        // corrector, which cost 3–5 s on CPU per dictation and only earned
+        // its keep on grammatical fixes (verb tense, subject-verb) that are
+        // rare in deliberate single-speaker dictation.
+        if !cleaned.is_empty() {
+            cleaned = cleanup::collapse_repeats(&cleaned);
+            cleaned = cleanup::scrub_hallucinations(&cleaned);
         }
+        let _ = avg_logprob; // retained from transcribe; no longer drives gating.
 
         // Final caption — overlay shows this for 500 ms then hides.
         let _ = app.emit("transcription://final", &cleaned);
@@ -342,11 +327,7 @@ impl Recorder {
         let latency_ms = started.elapsed().as_millis() as i64;
 
         if settings.save_transcriptions && !cleaned.is_empty() && !app_disabled {
-            let model_label = match settings.engine.as_str() {
-                "local" => effective_model.clone(),
-                "cloud" => "groq-whisper-large-v3-turbo".to_string(),
-                other => other.to_string(),
-            };
+            let model_label = effective_model.clone();
             let now_secs = SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .map(|d| d.as_secs() as i64)
@@ -362,7 +343,7 @@ impl Recorder {
                 model: &model_label,
                 duration_ms,
                 latency_ms,
-                source: settings.engine.as_str(),
+                source: "local",
             });
 
             match insert_result {
@@ -863,7 +844,7 @@ fn budgeted_join(base: &str, extras: &[String], budget: usize) -> String {
 
 /// Apply learned corrections to a transcript. Two-pass:
 ///
-/// 1. **Exact-match pass.** Rows with `count >= 3` substitute their `wrong`
+/// 1. **Exact-match pass.** Rows with `count >= 1` substitute their `wrong`
 ///    string case-insensitively at whole-word boundaries. The `context` field
 ///    is advisory: when present, at least one non-stopword 4+-char token from
 ///    it must also appear in the surrounding text, guarding against blind
@@ -881,7 +862,7 @@ fn apply_replacements(
 ) -> String {
     let mut out = text.to_string();
     for r in rows {
-        if r.count < 3 || r.wrong.is_empty() || r.right.is_empty() {
+        if r.count < 1 || r.wrong.is_empty() || r.right.is_empty() {
             continue;
         }
         if !context_ok_for_row(&out, r) {
@@ -942,7 +923,7 @@ fn apply_phonetic_pass(text: &str, rows: &[crate::db::CorrectionRow]) -> String 
     // below count threshold up-front.
     let mut by_key: HashMap<String, Vec<&crate::db::CorrectionRow>> = HashMap::new();
     for r in rows {
-        if r.count < 3 || r.wrong.is_empty() || r.right.is_empty() {
+        if r.count < 1 || r.wrong.is_empty() || r.right.is_empty() {
             continue;
         }
         if r.wrong.split_whitespace().count() != 1 {
@@ -1097,8 +1078,20 @@ mod tests {
     }
 
     #[test]
-    fn replacements_require_min_count_3() {
-        let rows = vec![cr("Kaidhar", "KD", 2, None)];
+    fn replacements_fire_at_count_1() {
+        // Threshold lowered from 3 to 1: a single learned correction
+        // immediately substitutes on the next dictation.
+        let rows = vec![cr("Kaidhar", "KD", 1, None)];
+        assert_eq!(
+            apply_replacements("send to Kaidhar tomorrow", &rows, false),
+            "send to KD tomorrow"
+        );
+    }
+
+    #[test]
+    fn replacements_skip_count_zero() {
+        // count == 0 means tombstoned in the DB upsert path; never apply.
+        let rows = vec![cr("Kaidhar", "KD", 0, None)];
         assert_eq!(
             apply_replacements("send to Kaidhar tomorrow", &rows, false),
             "send to Kaidhar tomorrow"

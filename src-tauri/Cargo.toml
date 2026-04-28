@@ -26,13 +26,18 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "fs", "process
 dirs = "6"
 arboard = "3"
 futures-util = "0.3"
-keyring = { version = "3", features = ["apple-native", "windows-native", "linux-native-sync-persistent"] }
 rusqlite = { version = "0.32", features = ["bundled"] }
 active-win-pos-rs = "0.9"
 similar = "2"
 rubato = "0.15"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 rphonetic = "3"
+
+# Aho-Corasick automaton for the post-transcription hallucination scrub
+# (whole-line + trailing matches against a small bag of known Whisper
+# hallucinations like "Thanks for watching"). Replaces the prior T5 grammar
+# corrector — see src/cleanup/scrub.rs.
+aho-corasick = "1"
 
 # whisper-rs is split per-target so each OS picks the right GPU backend by
 # default: Metal on macOS, CUDA on Windows/Linux. The CUDA build requires the
