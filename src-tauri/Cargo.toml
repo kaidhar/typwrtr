@@ -41,15 +41,22 @@ aho-corasick = "1"
 
 # whisper-rs is split per-target so each OS picks the right GPU backend by
 # default: Metal on macOS, CUDA on Windows/Linux. The CUDA build requires the
-# NVIDIA CUDA Toolkit (nvcc on PATH) at compile time. To fall back to a
-# CPU-only build on a Windows/Linux machine without CUDA, drop the features
-# array on the second target line.
+# NVIDIA CUDA Toolkit (nvcc on PATH) at compile time. CPU-only Windows/Linux
+# builds drop the `cuda` feature via `cargo build --no-default-features`.
+[features]
+default = ["cuda"]
+# Pulls in `whisper-rs/cuda` on non-macOS targets. macOS is already on `metal`
+# unconditionally; this feature is a no-op there. Building with
+# `--no-default-features` produces a CPU-only Windows/Linux artifact that runs
+# on machines without the NVIDIA CUDA Toolkit / cuBLAS runtime DLLs installed.
+cuda = ["whisper-rs/cuda"]
+
 [target.'cfg(target_os = "macos")'.dependencies]
 whisper-rs = { version = "0.16", features = ["metal"] }
 core-graphics = "0.24"
 
 [target.'cfg(not(target_os = "macos"))'.dependencies]
-whisper-rs = { version = "0.16", features = ["cuda"] }
+whisper-rs = { version = "0.16" }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Com", "Win32_UI_Accessibility"] }
