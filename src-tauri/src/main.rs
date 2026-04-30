@@ -267,6 +267,45 @@ fn list_top_vocabulary(state: State<AppState>, limit: i64) -> Result<Vec<Vocabul
     state.db.top_vocab_combined(limit)
 }
 
+/// Convert a UI-friendly "since N days" filter into a unix-secs threshold.
+/// `0` or negative `since_days` means "lifetime" — return 0 so the SQL
+/// query filters nothing.
+fn since_unix_secs(since_days: i64) -> i64 {
+    if since_days <= 0 {
+        return 0;
+    }
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    now.saturating_sub(since_days.saturating_mul(86_400))
+}
+
+#[tauri::command]
+fn usage_window(
+    state: State<AppState>,
+    since_days: i64,
+) -> Result<typwrtr_lib::db::UsageWindow, String> {
+    state.db.usage_window(since_unix_secs(since_days))
+}
+
+#[tauri::command]
+fn daily_buckets(
+    state: State<AppState>,
+    days: i64,
+) -> Result<Vec<typwrtr_lib::db::DailyBucket>, String> {
+    state.db.daily_buckets(days)
+}
+
+#[tauri::command]
+fn app_breakdown(
+    state: State<AppState>,
+    since_days: i64,
+    limit: i64,
+) -> Result<Vec<typwrtr_lib::db::AppBreakdown>, String> {
+    state.db.app_breakdown(since_unix_secs(since_days), limit)
+}
+
 #[tauri::command]
 fn forget_correction(app: tauri::AppHandle, state: State<AppState>, id: i64) -> Result<(), String> {
     let now = std::time::SystemTime::now()
@@ -586,6 +625,9 @@ fn main() {
             save_correction,
             list_top_corrections,
             list_top_vocabulary,
+            usage_window,
+            daily_buckets,
+            app_breakdown,
             forget_correction,
             forget_vocabulary,
             list_snippets,

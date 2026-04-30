@@ -41,10 +41,12 @@
           <nav id="sidebar-nav" aria-label="Settings sections">
             <a class="nav-item active" data-section="general" tabindex="0">
               <svg class="nav-icon" width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true">
-                <path d="M4 12a8 8 0 1116 0 8 8 0 01-16 0Z" stroke="currentColor" stroke-width="1.7" />
-                <path d="M12 8v4l2.7 1.8" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" />
+                <rect x="3" y="3" width="7" height="9" rx="1.5" stroke="currentColor" stroke-width="1.7" />
+                <rect x="14" y="3" width="7" height="5" rx="1.5" stroke="currentColor" stroke-width="1.7" />
+                <rect x="14" y="12" width="7" height="9" rx="1.5" stroke="currentColor" stroke-width="1.7" />
+                <rect x="3" y="16" width="7" height="5" rx="1.5" stroke="currentColor" stroke-width="1.7" />
               </svg>
-              <span>General</span>
+              <span>Dashboard</span>
             </a>
             <a class="nav-item" data-section="engine" tabindex="0">
               <svg class="nav-icon" width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true">
@@ -120,9 +122,78 @@
 
           <section id="section-general" class="content-section active">
             <div class="section-header">
-              <span class="section-kicker">Step 1</span>
-              <h2 class="section-title">Choose your input</h2>
-              <p class="section-desc">Pick the microphone typwrtr should listen to before you start dictating.</p>
+              <span class="section-kicker">Overview</span>
+              <h2 class="section-title">Dashboard</h2>
+              <p class="section-desc">Your dictation at a glance — words spoken, time saved, edit-rate trend, and where the voice path is paying off across your apps.</p>
+            </div>
+
+            <div class="dashboard">
+              <div class="dashboard-header">
+                <h3>Activity</h3>
+                <select id="dashboard-window">
+                  <option value="7">Last 7 days</option>
+                  <option value="30" selected>Last 30 days</option>
+                  <option value="0">Lifetime</option>
+                </select>
+              </div>
+
+              <div class="dashboard-hero">
+                <div class="dashboard-hero-icon">⏱</div>
+                <div class="dashboard-hero-body">
+                  <div class="dashboard-hero-label">Time saved</div>
+                  <div class="dashboard-hero-value" id="stat-time-saved">—</div>
+                  <div class="dashboard-hero-detail" id="stat-time-saved-detail">Loading…</div>
+                </div>
+              </div>
+
+              <div class="stat-grid">
+                <div class="stat-card">
+                  <div class="stat-card-label">Words dictated</div>
+                  <div class="stat-card-value" id="stat-words">—</div>
+                  <div class="stat-card-meta" id="stat-words-meta">—</div>
+                </div>
+                <div class="stat-card">
+                  <div class="stat-card-label">Dictations</div>
+                  <div class="stat-card-value" id="stat-dictations">—</div>
+                  <div class="stat-card-meta" id="stat-dictations-meta">—</div>
+                </div>
+                <div class="stat-card">
+                  <div class="stat-card-label">Edit rate</div>
+                  <div class="stat-card-value" id="stat-edit-rate">—</div>
+                  <div class="stat-card-meta">Lower = self-learning working</div>
+                </div>
+                <div class="stat-card">
+                  <div class="stat-card-label">Most-used app</div>
+                  <div class="stat-card-value" id="stat-top-app">—</div>
+                  <div class="stat-card-meta" id="stat-top-app-meta">—</div>
+                </div>
+              </div>
+
+              <div class="chart-grid">
+                <div class="chart-card">
+                  <div class="chart-card-label">Words per day</div>
+                  <svg id="chart-words-daily" class="sparkline" viewBox="0 0 320 60" preserveAspectRatio="none"></svg>
+                </div>
+                <div class="chart-card">
+                  <div class="chart-card-label">Edit rate (7-day rolling)</div>
+                  <svg id="chart-edit-rate" class="sparkline" viewBox="0 0 320 60" preserveAspectRatio="none"></svg>
+                </div>
+              </div>
+
+              <div class="app-breakdown">
+                <div class="chart-card-label">Where you dictate</div>
+                <div id="app-breakdown-list">
+                  <div class="empty-state">No app activity yet.</div>
+                </div>
+              </div>
+            </div>
+          </section>
+
+          <section id="section-engine" class="content-section">
+            <div class="section-header">
+              <span class="section-kicker">Engine</span>
+              <h2 class="section-title">Microphone &amp; model</h2>
+              <p class="section-desc">Pick the mic typwrtr listens to and the Whisper model that runs on your hardware. Models load on first use and stay resident.</p>
             </div>
             <div class="settings-list">
               <div class="setting-row feature-row">
@@ -134,16 +205,7 @@
                   <select id="mic-select" aria-label="Microphone"></select>
                 </div>
               </div>
-            </div>
-          </section>
 
-          <section id="section-engine" class="content-section">
-            <div class="section-header">
-              <span class="section-kicker">Step 2</span>
-              <h2 class="section-title">Whisper model</h2>
-              <p class="section-desc">Local Whisper transcribes on-device. Pick a model that suits your hardware. An optional self-hosted LLM cleanup pass is configured at the bottom of this section.</p>
-            </div>
-            <div class="settings-list">
               <div class="setting-row" id="local-settings">
                 <div class="setting-label">
                   <span class="label-text">Whisper Model</span>
@@ -262,6 +324,7 @@
               <h2 class="section-title">Self-learning data</h2>
               <p class="section-desc">typwrtr can keep your transcriptions on this machine to improve recognition over time. Everything stays local. Turn it off to dictate without leaving a trail.</p>
             </div>
+
             <div class="settings-list">
               <div class="setting-row">
                 <div class="setting-label">
@@ -302,7 +365,7 @@
               <div class="learning-block">
                 <div class="learning-block-header">
                   <h3>Top corrections</h3>
-                  <span class="label-hint">Pairs typwrtr learned from your fix-ups. Substitution kicks in at count ≥ 3.</span>
+                  <span class="label-hint">Pairs typwrtr learned from your fix-ups. Substitution kicks in at count ≥ 1.</span>
                 </div>
                 <div class="learning-table" id="top-corrections-table">
                   <div class="empty-state">No corrections recorded yet.</div>

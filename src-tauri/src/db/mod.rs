@@ -20,8 +20,11 @@ mod corrections;
 mod migrate;
 mod profiles;
 mod snippets;
+mod stats;
 mod transcriptions;
 mod vocab;
+
+pub use stats::{AppBreakdown, DailyBucket, UsageWindow};
 
 const DB_FILENAME: &str = "typwrtr.sqlite";
 
@@ -655,5 +658,168 @@ mod tests {
         assert_eq!(db.health().unwrap().transcriptions, 1);
         db.wipe_learning_data().unwrap();
         assert_eq!(db.health().unwrap().transcriptions, 0);
+    }
+
+    #[test]
+    fn usage_window_counts_words_dictations_edits() {
+        let db = fresh_db();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        // Two clean dictations + one edited.
+        db.insert_transcription(NewTranscription {
+            created_at: now,
+            audio_path: None,
+            raw_text: "x",
+            cleaned_text: "Hello there friend.",
+            app_bundle_id: Some("code"),
+            app_title: Some("VS Code"),
+            model: "medium.en",
+            duration_ms: 2000,
+            latency_ms: 800,
+            source: "local",
+        })
+        .unwrap();
+        db.insert_transcription(NewTranscription {
+            created_at: now,
+            audio_path: None,
+            raw_text: "x",
+            cleaned_text: "Two words.",
+            app_bundle_id: Some("code"),
+            app_title: Some("VS Code"),
+            model: "medium.en",
+            duration_ms: 1000,
+            latency_ms: 600,
+            source: "local",
+        })
+        .unwrap();
+        let edited_id = db
+            .insert_transcription(NewTranscription {
+                created_at: now,
+                audio_path: None,
+                raw_text: "x",
+                cleaned_text: "One two three four.",
+                app_bundle_id: Some("slack"),
+                app_title: Some("Slack"),
+                model: "medium.en",
+                duration_ms: 1500,
+                latency_ms: 700,
+                source: "local",
+            })
+            .unwrap();
+        db.set_final_text(edited_id, "One two three.").unwrap();
+
+        let w = db.usage_window(0).unwrap();
+        // Hello/there/friend (3) + Two/words (2) + One/two/three/four (4) = 9
+        assert_eq!(w.words, 9);
+        assert_eq!(w.dictations, 3);
+        assert_eq!(w.duration_ms_total, 4500);
+        assert_eq!(w.edited, 1);
+        assert_eq!(w.avg_latency_ms, 700);
+    }
+
+    #[test]
+    fn daily_buckets_groups_by_date() {
+        let db = fresh_db();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        // Two on the same "today", one yesterday.
+        let yesterday = now - 86_400;
+        db.insert_transcription(NewTranscription {
+            created_at: now,
+            audio_path: None,
+            raw_text: "x",
+            cleaned_text: "Hello world.",
+            app_bundle_id: None,
+            app_title: None,
+            model: "m",
+            duration_ms: 0,
+            latency_ms: 0,
+            source: "local",
+        })
+        .unwrap();
+        db.insert_transcription(NewTranscription {
+            created_at: now,
+            audio_path: None,
+            raw_text: "x",
+            cleaned_text: "Three more words.",
+            app_bundle_id: None,
+            app_title: None,
+            model: "m",
+            duration_ms: 0,
+            latency_ms: 0,
+            source: "local",
+        })
+        .unwrap();
+        db.insert_transcription(NewTranscription {
+            created_at: yesterday,
+            audio_path: None,
+            raw_text: "x",
+            cleaned_text: "Yesterday content.",
+            app_bundle_id: None,
+            app_title: None,
+            model: "m",
+            duration_ms: 0,
+            latency_ms: 0,
+            source: "local",
+        })
+        .unwrap();
+
+        let buckets = db.daily_buckets(7).unwrap();
+        // At least the two days we inserted; daylight-savings or month
+        // boundary won't add extra rows since SQLite skips empty groups.
+        assert!(buckets.len() >= 2, "got {:?}", buckets);
+        let totals: i64 = buckets.iter().map(|b| b.dictations).sum();
+        assert_eq!(totals, 3);
+        let words: i64 = buckets.iter().map(|b| b.words).sum();
+        // Hello/world (2) + Three/more/words (3) + Yesterday/content (2) = 7
+        assert_eq!(words, 7);
+    }
+
+    #[test]
+    fn app_breakdown_orders_by_word_count() {
+        let db = fresh_db();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        // 5 words for code, 2 for slack.
+        db.insert_transcription(NewTranscription {
+            created_at: now,
+            audio_path: None,
+            raw_text: "x",
+            cleaned_text: "Five whole words right here.",
+            app_bundle_id: Some("code"),
+            app_title: Some("VS Code"),
+            model: "m",
+            duration_ms: 0,
+            latency_ms: 0,
+            source: "local",
+        })
+        .unwrap();
+        db.insert_transcription(NewTranscription {
+            created_at: now,
+            audio_path: None,
+            raw_text: "x",
+            cleaned_text: "Two words.",
+            app_bundle_id: Some("slack"),
+            app_title: Some("Slack"),
+            model: "m",
+            duration_ms: 0,
+            latency_ms: 0,
+            source: "local",
+        })
+        .unwrap();
+
+        let rows = db.app_breakdown(0, 10).unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].bundle_id, "code");
+        assert_eq!(rows[0].words, 5);
+        assert_eq!(rows[0].display_name, "VS Code");
+        assert_eq!(rows[1].bundle_id, "slack");
+        assert_eq!(rows[1].words, 2);
     }
 }

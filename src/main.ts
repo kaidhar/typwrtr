@@ -26,6 +26,28 @@ interface DbHealth {
   snippets: number;
 }
 
+interface UsageWindow {
+  words: number;
+  dictations: number;
+  duration_ms_total: number;
+  edited: number;
+  avg_latency_ms: number;
+}
+
+interface DailyBucket {
+  date: string;
+  words: number;
+  dictations: number;
+  edit_rate: number;
+}
+
+interface AppBreakdown {
+  bundle_id: string;
+  display_name: string;
+  words: number;
+  dictations: number;
+}
+
 interface SnippetRow {
   id: number;
   trigger: string;
@@ -131,6 +153,19 @@ const dbHealthLine = document.getElementById("db-health-line")!;
 const clearLearningBtn = document.getElementById("clear-learning-btn") as HTMLButtonElement;
 const topCorrectionsTable = document.getElementById("top-corrections-table")!;
 const topVocabTable = document.getElementById("top-vocab-table")!;
+const dashboardWindowSelect = document.getElementById("dashboard-window") as HTMLSelectElement;
+const statTimeSaved = document.getElementById("stat-time-saved")!;
+const statTimeSavedDetail = document.getElementById("stat-time-saved-detail")!;
+const statWords = document.getElementById("stat-words")!;
+const statWordsMeta = document.getElementById("stat-words-meta")!;
+const statDictations = document.getElementById("stat-dictations")!;
+const statDictationsMeta = document.getElementById("stat-dictations-meta")!;
+const statEditRate = document.getElementById("stat-edit-rate")!;
+const statTopApp = document.getElementById("stat-top-app")!;
+const statTopAppMeta = document.getElementById("stat-top-app-meta")!;
+const chartWordsDaily = document.getElementById("chart-words-daily")!;
+const chartEditRate = document.getElementById("chart-edit-rate")!;
+const appBreakdownList = document.getElementById("app-breakdown-list")!;
 const appProfilesList = document.getElementById("app-profiles-list")!;
 const appProfilesEmpty = document.getElementById("app-profiles-empty")!;
 const snippetsList = document.getElementById("snippets-list")!;
@@ -372,10 +407,159 @@ async function loadSettings() {
   saveTranscriptionsToggle.checked = currentSettings.saveTranscriptions;
   keepAudioClipsToggle.checked = currentSettings.keepAudioClips;
   void refreshDbHealth();
+  void refreshDashboard();
   void refreshAppProfiles();
   void refreshLearningTables();
   void refreshSnippets();
 }
+
+function dashboardSinceDays(): number {
+  return Number(dashboardWindowSelect?.value ?? "30");
+}
+
+function dashboardWindowLabel(): string {
+  const v = dashboardSinceDays();
+  if (v === 0) return "lifetime";
+  if (v === 7) return "this week";
+  return "this month";
+}
+
+function formatDuration(secondsTotal: number): { value: string; detail: string } {
+  if (secondsTotal <= 0) {
+    return { value: "0 min", detail: "Dictate something to start the clock." };
+  }
+  const minutes = Math.round(secondsTotal / 60);
+  if (minutes < 60) {
+    return { value: `${minutes} min`, detail: "" };
+  }
+  const hours = Math.floor(minutes / 60);
+  const mins = minutes - hours * 60;
+  return { value: mins > 0 ? `${hours} h ${mins} min` : `${hours} h`, detail: "" };
+}
+
+const SPEAKING_WPM = 150;
+const TYPING_WPM = 45;
+
+function timeSavedSeconds(words: number): number {
+  if (words <= 0) return 0;
+  // Saved = how long typing would have taken minus how long speaking did.
+  return words / TYPING_WPM * 60 - words / SPEAKING_WPM * 60;
+}
+
+function renderSparkline(svg: Element, values: number[], invert = false) {
+  svg.innerHTML = "";
+  if (values.length === 0) return;
+  const W = 320;
+  const H = 60;
+  const PAD = 4;
+  const max = Math.max(...values, 1);
+  const min = Math.min(...values, 0);
+  const range = Math.max(max - min, 1e-6);
+  const innerH = H - 2 * PAD;
+  const innerW = W - 2 * PAD;
+  const step = values.length > 1 ? innerW / (values.length - 1) : 0;
+  const points = values.map((v, i) => {
+    const x = PAD + i * step;
+    const norm = (v - min) / range;
+    const y = invert ? PAD + norm * innerH : PAD + (1 - norm) * innerH;
+    return `${x.toFixed(1)},${y.toFixed(1)}`;
+  });
+  const polyAttrs = `points="${points.join(" ")}"`;
+  // Filled area below the line for the words/day chart.
+  const lastX = (PAD + (values.length - 1) * step).toFixed(1);
+  const baseY = (H - PAD).toFixed(1);
+  const areaPoints = `${PAD},${baseY} ${points.join(" ")} ${lastX},${baseY}`;
+  svg.innerHTML = `
+    <polygon class="area" points="${areaPoints}"></polygon>
+    <polyline ${polyAttrs}></polyline>
+  `;
+}
+
+function rolling7Avg(buckets: DailyBucket[]): number[] {
+  const out: number[] = [];
+  for (let i = 0; i < buckets.length; i++) {
+    const start = Math.max(0, i - 6);
+    let dictations = 0;
+    let edited = 0;
+    for (let j = start; j <= i; j++) {
+      dictations += buckets[j].dictations;
+      edited += Math.round(buckets[j].edit_rate * buckets[j].dictations);
+    }
+    out.push(dictations > 0 ? edited / dictations : 0);
+  }
+  return out;
+}
+
+async function refreshDashboard() {
+  const sinceDays = dashboardSinceDays();
+  const label = dashboardWindowLabel();
+  try {
+    const [w, daily, apps] = await Promise.all([
+      invoke<UsageWindow>("usage_window", { sinceDays }),
+      invoke<DailyBucket[]>("daily_buckets", { days: sinceDays === 0 ? 90 : sinceDays }),
+      invoke<AppBreakdown[]>("app_breakdown", { sinceDays, limit: 5 }),
+    ]);
+
+    const saved = timeSavedSeconds(w.words);
+    const fmt = formatDuration(saved);
+    statTimeSaved.textContent = fmt.value;
+    statTimeSavedDetail.textContent = w.words > 0
+      ? `Based on ${w.words.toLocaleString()} words at ${SPEAKING_WPM} wpm vs ${TYPING_WPM} wpm typing.`
+      : (fmt.detail || `No dictations ${label}.`);
+
+    statWords.textContent = w.words.toLocaleString();
+    statWordsMeta.textContent = label;
+    statDictations.textContent = w.dictations.toLocaleString();
+    const dictMins = Math.round(w.duration_ms_total / 60000);
+    statDictationsMeta.textContent = w.dictations > 0
+      ? `${dictMins} min recorded`
+      : label;
+
+    const editPct = w.dictations > 0
+      ? Math.round((w.edited / w.dictations) * 100)
+      : 0;
+    statEditRate.textContent = `${editPct}%`;
+
+    if (apps.length > 0) {
+      statTopApp.textContent = apps[0].display_name;
+      statTopAppMeta.textContent = `${apps[0].words.toLocaleString()} words`;
+    } else {
+      statTopApp.textContent = "—";
+      statTopAppMeta.textContent = `No app activity ${label}`;
+    }
+
+    renderSparkline(chartWordsDaily, daily.map(b => b.words));
+    // Edit rate trend: invert so the line falls when rate falls (good).
+    renderSparkline(chartEditRate, rolling7Avg(daily), true);
+
+    appBreakdownList.innerHTML = "";
+    if (apps.length === 0) {
+      const empty = document.createElement("div");
+      empty.className = "empty-state";
+      empty.textContent = `No app activity ${label}.`;
+      appBreakdownList.appendChild(empty);
+    } else {
+      const totalWords = apps.reduce((s, a) => s + a.words, 0) || 1;
+      for (const a of apps) {
+        const pct = Math.max(2, Math.round((a.words / totalWords) * 100));
+        const row = document.createElement("div");
+        row.className = "app-bar-row";
+        row.innerHTML = `
+          <span class="app-name">${escapeHtml(a.display_name)}</span>
+          <span class="app-bar"><span class="app-bar-fill" style="width:${pct}%"></span></span>
+          <span class="app-meta">${a.words.toLocaleString()} · ${pct}%</span>
+        `;
+        appBreakdownList.appendChild(row);
+      }
+    }
+  } catch (e) {
+    console.error("dashboard refresh failed:", e);
+  }
+}
+
+dashboardWindowSelect?.addEventListener("change", () => {
+  void refreshDashboard();
+});
 
 async function refreshDbHealth() {
   try {
@@ -923,8 +1107,15 @@ clearLearningBtn.addEventListener("click", async () => {
   }
 });
 
-// Refresh the DB-health line whenever the user opens the Learning tab so
-// counts stay live without polling.
+// Dashboard sits on the General tab — refresh when the user opens it so the
+// stats stay live without polling.
+const generalNavItem = document.querySelector<HTMLElement>('[data-section="general"]');
+generalNavItem?.addEventListener("click", () => {
+  void refreshDashboard();
+});
+
+// Refresh the DB-health line + tables whenever the user opens the Learning
+// tab so counts stay live without polling.
 const learningNavItem = document.querySelector<HTMLElement>('[data-section="learning"]');
 learningNavItem?.addEventListener("click", () => {
   void refreshDbHealth();
@@ -945,6 +1136,7 @@ snippetsNavItem?.addEventListener("click", () => {
 // recorder after each transcription, by save_correction, by forget_*, etc.
 void listen<number>("learning://changed", () => {
   void refreshDbHealth();
+  void refreshDashboard();
   void refreshLearningTables();
   void refreshAppProfiles();
 });
