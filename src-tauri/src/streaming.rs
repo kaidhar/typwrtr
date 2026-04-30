@@ -14,8 +14,8 @@ use std::time::Duration;
 use tauri::{AppHandle, Emitter};
 
 use crate::audio::capture::{self as audio, AudioRecorder};
-use crate::transcribe_local::{LocalTranscriber, TranscribeOptions};
 use crate::audio::vad;
+use crate::transcribe::{self, TranscribeOptions, Transcriber};
 
 /// Configuration for one streaming session. Lifted from `Settings` at
 /// `Recorder::start_recording` time so changes don't take effect mid-recording.
@@ -62,7 +62,7 @@ pub struct PartialPayload {
 pub fn spawn(
     app: AppHandle,
     audio_recorder: Arc<std::sync::Mutex<AudioRecorder>>,
-    local: Arc<LocalTranscriber>,
+    local: Arc<dyn Transcriber>,
     config: StreamingConfig,
 ) -> StreamingHandle {
     let stop = Arc::new(AtomicBool::new(false));
@@ -146,7 +146,7 @@ pub fn spawn(
             };
             let model_path = config.model_path.clone();
             let local_clone = local.clone();
-            let result = local_clone.transcribe(&model_path, processed, opts).await;
+            let result = transcribe::transcribe(local_clone, model_path, processed, opts).await;
 
             match result {
                 Ok(res) => {

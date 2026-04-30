@@ -104,15 +104,21 @@ const CODE_CASES: ReadonlyArray<{ value: string; label: string }> = [
   { value: "camel", label: "camelCase" },
   { value: "kebab", label: "kebab-case" },
 ];
-const WHISPER_MODELS: ReadonlyArray<{ value: string; label: string }> = [
-  { value: "base.en", label: "Base English" },
-  { value: "small.en", label: "Small English" },
-  { value: "small", label: "Small Multilingual" },
-  { value: "medium.en", label: "Medium English" },
-  { value: "medium", label: "Medium Multilingual" },
-  { value: "large-v3-turbo", label: "Large v3 Turbo" },
-  { value: "large-v3", label: "Large v3" },
+/// The shipped model lineup. Keep this list short — only entries that
+/// pull weight in real use survive. `engine` controls which Tauri-side
+/// transcriber the model dispatches to.
+const MODELS: ReadonlyArray<{ value: string; label: string; engine: "whisper" | "parakeet" }> = [
+  { value: "large-v3-turbo", label: "Whisper Large v3 Turbo · GPU", engine: "whisper" },
+  { value: "parakeet-tdt-0.6b-v2", label: "Parakeet TDT 0.6B v2 · CPU", engine: "parakeet" },
+  { value: "medium.en", label: "Whisper Medium English · low-VRAM fallback", engine: "whisper" },
 ];
+
+/// Engine name for a given model id. Mirrors `engine_for_model` on the
+/// Rust side so the UI can hide engine-specific controls.
+function engineForModel(modelId: string): "whisper" | "parakeet" {
+  const m = MODELS.find(x => x.value === modelId);
+  return m?.engine ?? "whisper";
+}
 
 interface MicDevice {
   name: string;
@@ -144,6 +150,7 @@ const pttHotkeySet = document.getElementById("ptt-hotkey-set")!;
 const fixupHotkeyText = document.getElementById("fixup-hotkey-text")!;
 const fixupHotkeySet = document.getElementById("fixup-hotkey-set")!;
 const streamingCaptionsToggle = document.getElementById("streaming-captions") as HTMLInputElement;
+const streamingCaptionsRow = document.getElementById("streaming-captions-row")!;
 const vadSilenceInput = document.getElementById("vad-silence-ms") as HTMLInputElement;
 const hotkeyCaptureStatus = document.getElementById("hotkey-capture-status")!;
 const heroStateLabel = document.getElementById("hero-state-label");
@@ -371,6 +378,18 @@ function ensureValidModelSelection(model: string): string {
   return available.includes(model) ? model : "medium.en";
 }
 
+/// Show / hide engine-specific UI bits based on which model is currently
+/// selected. Streaming captions disappear under Parakeet because the
+/// `parakeet-rs` runtime doesn't expose a per-tick API today.
+function refreshEngineGatedControls() {
+  const engine = engineForModel(modelSelect.value);
+  const streamingOk = engine === "whisper";
+  streamingCaptionsRow.classList.toggle("hidden", !streamingOk);
+  if (!streamingOk) {
+    streamingCaptionsToggle.checked = false;
+  }
+}
+
 async function loadSettings() {
   currentSettings = await invoke<Settings>("get_settings");
 
@@ -394,6 +413,7 @@ async function loadSettings() {
   // Streaming captions + VAD
   streamingCaptionsToggle.checked = currentSettings.streamingCaptions ?? false;
   vadSilenceInput.value = String(currentSettings.vadSilenceMs ?? 800);
+  refreshEngineGatedControls();
 
   // Hotkeys
   renderHotkeyFields();
@@ -672,7 +692,7 @@ function renderAppProfile(row: AppProfileRow): HTMLElement {
 
   const modelOptions = [`<option value="">Use global default</option>`]
     .concat(
-      WHISPER_MODELS.map(
+      MODELS.map(
         (m) =>
           `<option value="${m.value}"${(row.preferred_model ?? "") === m.value ? " selected" : ""}>${m.label}</option>`,
       ),
@@ -1182,6 +1202,7 @@ micSelect.addEventListener("change", () => {
 });
 
 modelSelect.addEventListener("change", async () => {
+  refreshEngineGatedControls();
   await checkModelStatus();
   void saveSettings().catch((error) => console.error("Failed to save settings:", error));
 });

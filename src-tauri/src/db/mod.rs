@@ -531,13 +531,37 @@ mod tests {
             .unwrap();
 
         let c1 = db
-            .upsert_correction(tid, "Kaidhar", "KD", Some("ctx"), Some("code"), 100, "manual")
+            .upsert_correction(
+                tid,
+                "Kaidhar",
+                "KD",
+                Some("ctx"),
+                Some("code"),
+                100,
+                "manual",
+            )
             .unwrap();
         let c2 = db
-            .upsert_correction(tid, "Kaidhar", "KD", Some("ctx"), Some("code"), 200, "manual")
+            .upsert_correction(
+                tid,
+                "Kaidhar",
+                "KD",
+                Some("ctx"),
+                Some("code"),
+                200,
+                "manual",
+            )
             .unwrap();
         let c3 = db
-            .upsert_correction(tid, "Kaidhar", "KD", Some("ctx"), Some("code"), 300, "manual")
+            .upsert_correction(
+                tid,
+                "Kaidhar",
+                "KD",
+                Some("ctx"),
+                Some("code"),
+                300,
+                "manual",
+            )
             .unwrap();
         assert_eq!((c1, c2, c3), (1, 2, 3));
     }
@@ -559,15 +583,31 @@ mod tests {
                 source: "local",
             })
             .unwrap();
-        db.upsert_correction(tid, "rust SQL light", "rusqlite", None, Some("code"), 100, "manual")
-            .unwrap();
+        db.upsert_correction(
+            tid,
+            "rust SQL light",
+            "rusqlite",
+            None,
+            Some("code"),
+            100,
+            "manual",
+        )
+        .unwrap();
         let row = db.top_corrections_for_app("code", 10).unwrap();
         assert_eq!(row.len(), 1);
         let cid = row[0].id;
         db.forget_correction(cid, 200).unwrap();
         assert!(db.top_corrections_for_app("code", 10).unwrap().is_empty());
         let count_after = db
-            .upsert_correction(tid, "rust SQL light", "rusqlite", None, Some("code"), 300, "manual")
+            .upsert_correction(
+                tid,
+                "rust SQL light",
+                "rusqlite",
+                None,
+                Some("code"),
+                300,
+                "manual",
+            )
             .unwrap();
         assert_eq!(count_after, 0);
         assert!(db.top_corrections_for_app("code", 10).unwrap().is_empty());

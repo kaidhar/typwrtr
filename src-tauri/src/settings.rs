@@ -74,6 +74,13 @@ impl Settings {
         app_dir.join("config.json")
     }
 
+    /// Which ASR engine the currently-selected model belongs to. Drives
+    /// dispatch in the recorder + streaming, plus UI visibility for
+    /// engine-specific features (streaming captions today).
+    pub fn engine(&self) -> &'static str {
+        engine_for_model(&self.whisper_model)
+    }
+
     pub fn load(app_dir: &PathBuf) -> Self {
         let path = Self::config_path(app_dir);
         let raw = fs::read_to_string(&path).ok();
@@ -120,6 +127,18 @@ impl Settings {
         fs::create_dir_all(app_dir).map_err(|e| e.to_string())?;
         let json = serde_json::to_string_pretty(self).map_err(|e| e.to_string())?;
         fs::write(&path, json).map_err(|e| e.to_string())
+    }
+}
+
+/// Static mapping from model id to engine name. Centralised so the
+/// recorder, streaming task, and download command all agree. Returns
+/// `"parakeet"` for Parakeet TDT model ids; `"whisper"` for everything
+/// else (the default keeps unknown ids on the safer whisper path).
+pub fn engine_for_model(model_id: &str) -> &'static str {
+    if model_id.starts_with("parakeet") {
+        "parakeet"
+    } else {
+        "whisper"
     }
 }
 

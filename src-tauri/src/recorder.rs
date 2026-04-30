@@ -15,7 +15,7 @@ use crate::learning::focused_text;
 use crate::learning::{apply_correction_pairs, similar_ratio};
 use crate::settings::Settings;
 use crate::streaming::{self, StreamingConfig, StreamingHandle};
-use crate::transcribe_local::{self, LocalTranscriber, TranscribeOptions};
+use crate::transcribe::{self, TranscribeOptions, Transcriber};
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub enum RecordingState {
@@ -39,24 +39,34 @@ fn update_overlay(app: &AppHandle, state: &RecordingState) {
 pub struct Recorder {
     state: Arc<Mutex<RecordingState>>,
     audio_recorder: Arc<Mutex<AudioRecorder>>,
-    local: Arc<LocalTranscriber>,
+    /// Active transcription engine. Swapped at runtime when the user picks
+    /// a model that belongs to a different engine (whisper ↔ parakeet);
+    /// the swap is atomic via this mutex so an in-flight `stop_and_transcribe`
+    /// either sees the old engine the whole way through or the new one.
+    local: Mutex<Arc<dyn Transcriber>>,
     db: Arc<Db>,
     streaming: Mutex<Option<StreamingHandle>>,
 }
 
 impl Recorder {
-    pub fn new(local: Arc<LocalTranscriber>, db: Arc<Db>) -> Self {
+    pub fn new(local: Arc<dyn Transcriber>, db: Arc<Db>) -> Self {
         Self {
             state: Arc::new(Mutex::new(RecordingState::Ready)),
             audio_recorder: Arc::new(Mutex::new(AudioRecorder::new())),
-            local,
+            local: Mutex::new(local),
             db,
             streaming: Mutex::new(None),
         }
     }
 
-    pub fn local_transcriber(&self) -> Arc<LocalTranscriber> {
-        self.local.clone()
+    pub fn local_transcriber(&self) -> Arc<dyn Transcriber> {
+        self.local.lock().unwrap().clone()
+    }
+
+    /// Swap in a different engine. Called from `save_settings` when the
+    /// user picks a model that belongs to a different engine family.
+    pub fn set_transcriber(&self, transcriber: Arc<dyn Transcriber>) {
+        *self.local.lock().unwrap() = transcriber;
     }
 
     pub fn get_state(&self) -> RecordingState {
@@ -83,9 +93,16 @@ impl Recorder {
 
         // Phase 5 — kick the streaming + VAD task if the user opted in. Stops
         // automatically on the next stop_and_transcribe call.
-        if settings.streaming_captions || settings.vad_silence_ms > 0 {
-            let model_path =
-                model_dir.join(transcribe_local::model_filename(&settings.whisper_model));
+        //
+        // Captions only fire on engines that can run cheap partial inference;
+        // Parakeet's TDT path doesn't (yet) expose streaming, so we keep VAD
+        // alive but disable per-tick whisper inference. The UI hides the
+        // toggle when the active engine reports `supports_streaming = false`,
+        // but a stale config could still flip it on — gate defensively here.
+        let active = self.local_transcriber();
+        let captions_ok = settings.streaming_captions && active.supports_streaming();
+        if captions_ok || settings.vad_silence_ms > 0 {
+            let model_path = model_dir.join(transcribe::model_filename(&settings.whisper_model));
             let cfg = StreamingConfig {
                 model_path,
                 initial_prompt: settings.initial_prompt.clone(),
@@ -93,14 +110,9 @@ impl Recorder {
                 partial_interval_ms: 700,
                 silence_threshold_ms: settings.vad_silence_ms as u64,
                 rms_threshold: 0.005,
-                emit_partials: settings.streaming_captions,
+                emit_partials: captions_ok,
             };
-            let handle = streaming::spawn(
-                app.clone(),
-                self.audio_recorder.clone(),
-                self.local.clone(),
-                cfg,
-            );
+            let handle = streaming::spawn(app.clone(), self.audio_recorder.clone(), active, cfg);
             *self.streaming.lock().unwrap() = Some(handle);
         }
 
@@ -212,13 +224,14 @@ impl Recorder {
             .to_string();
 
         let (raw_text, avg_logprob) = {
-            let model_path = model_dir.join(transcribe_local::model_filename(&effective_model));
+            let model_path = model_dir.join(transcribe::model_filename(&effective_model));
             let opts = TranscribeOptions {
                 language: settings.language.clone(),
                 initial_prompt: effective_prompt.clone(),
                 ..TranscribeOptions::default()
             };
-            let res = self.local.transcribe(&model_path, samples, opts).await?;
+            let res =
+                transcribe::transcribe(self.local_transcriber(), model_path, samples, opts).await?;
             (res.text, res.avg_logprob)
         };
 
@@ -487,11 +500,14 @@ fn schedule_auto_correction_check(
                 // Only finalize-on-focus-loss if we already saw an in-target
                 // edit. Otherwise let the user come back — the 60 s cap will
                 // end the watcher eventually if they don't.
-                let have_pending_edit = last_in_target.as_ref().is_some_and(|t| {
-                    normalize_for_match(t) != normalize_for_match(&cleaned_text)
-                });
+                let have_pending_edit = last_in_target
+                    .as_ref()
+                    .is_some_and(|t| normalize_for_match(t) != normalize_for_match(&cleaned_text));
                 if have_pending_edit {
-                    println!("[autolearn] tick {}: have a pending edit, finalizing now", tick_no);
+                    println!(
+                        "[autolearn] tick {}: have a pending edit, finalizing now",
+                        tick_no
+                    );
                     focus_loss_pending_finalize = true;
                     break;
                 }
@@ -502,15 +518,24 @@ fn schedule_auto_correction_check(
                 match tokio::task::spawn_blocking(focused_text::capture_focused_text).await {
                     Ok(Ok(Some(t))) => t.text,
                     Ok(Ok(None)) => {
-                        println!("[autolearn] tick {}: capture returned None (no focused text element)", tick_no);
+                        println!(
+                            "[autolearn] tick {}: capture returned None (no focused text element)",
+                            tick_no
+                        );
                         continue;
                     }
                     Ok(Err(e)) => {
-                        eprintln!("[autolearn] tick {}: focused text read failed: {}", tick_no, e);
+                        eprintln!(
+                            "[autolearn] tick {}: focused text read failed: {}",
+                            tick_no, e
+                        );
                         continue;
                     }
                     Err(e) => {
-                        eprintln!("[autolearn] tick {}: focused text join failed: {}", tick_no, e);
+                        eprintln!(
+                            "[autolearn] tick {}: focused text join failed: {}",
+                            tick_no, e
+                        );
                         continue;
                     }
                 };
@@ -567,10 +592,16 @@ fn schedule_auto_correction_check(
                 .unwrap_or(false);
             if unchanged_since_prev {
                 idle_ticks += 1;
-                println!("[autolearn] tick {}: idle tick {}/{}", tick_no, idle_ticks, AUTO_LEARN_IDLE_TICKS);
+                println!(
+                    "[autolearn] tick {}: idle tick {}/{}",
+                    tick_no, idle_ticks, AUTO_LEARN_IDLE_TICKS
+                );
             } else {
                 if idle_ticks > 0 {
-                    println!("[autolearn] tick {}: edits resumed, idle counter reset", tick_no);
+                    println!(
+                        "[autolearn] tick {}: edits resumed, idle counter reset",
+                        tick_no
+                    );
                 }
                 idle_ticks = 0;
             }
@@ -638,9 +669,15 @@ fn try_finalize_auto_learn(
         final_text.chars().take(80).collect::<String>()
     );
     let pairs = crate::learning::diff::pairs_from_diff(cleaned_text, &final_text, 4);
-    println!("[autolearn] finalize: diff produced {} pair(s)", pairs.len());
+    println!(
+        "[autolearn] finalize: diff produced {} pair(s)",
+        pairs.len()
+    );
     if pairs.is_empty() || pairs.len() > AUTO_LEARN_MAX_PAIR_COUNT {
-        println!("[autolearn] finalize: pair count out of range (0..={}), skipping", AUTO_LEARN_MAX_PAIR_COUNT);
+        println!(
+            "[autolearn] finalize: pair count out of range (0..={}), skipping",
+            AUTO_LEARN_MAX_PAIR_COUNT
+        );
         return false;
     }
     // Reject if any single pair replaces more than half the original — that
@@ -1058,7 +1095,7 @@ mod tests {
 
     #[test]
     fn test_initial_state_is_ready() {
-        let recorder = Recorder::new(Arc::new(LocalTranscriber::new()), fresh_db());
+        let recorder = Recorder::new(Arc::new(transcribe::WhisperTranscriber::new()), fresh_db());
         assert_eq!(recorder.get_state(), RecordingState::Ready);
     }
 

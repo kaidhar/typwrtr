@@ -44,8 +44,7 @@ pub struct AppBreakdown {
 const WORD_COUNT_SQL: &str =
     "(LENGTH(TRIM(cleaned_text)) - LENGTH(REPLACE(TRIM(cleaned_text), ' ', '')) + 1)";
 
-const EDITED_PRED: &str =
-    "(final_text IS NOT NULL AND TRIM(final_text) != TRIM(cleaned_text))";
+const EDITED_PRED: &str = "(final_text IS NOT NULL AND TRIM(final_text) != TRIM(cleaned_text))";
 
 impl Db {
     /// Aggregate counts for transcriptions created at-or-after

@@ -9,7 +9,7 @@ pub mod learning;
 pub mod recorder;
 pub mod settings;
 pub mod streaming;
-pub mod transcribe_local;
+pub mod transcribe;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {

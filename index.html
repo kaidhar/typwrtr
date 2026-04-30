@@ -208,19 +208,15 @@
 
               <div class="setting-row" id="local-settings">
                 <div class="setting-label">
-                  <span class="label-text">Whisper Model</span>
-                  <span class="label-hint">Start with medium.en for English. Use large-v3-turbo on stronger GPUs.</span>
+                  <span class="label-text">Model</span>
+                  <span class="label-hint">GPU users: Whisper large-v3-turbo. CPU-only boxes: Parakeet TDT v2. medium.en is a fallback for low-VRAM GPUs.</span>
                 </div>
                 <div class="setting-control">
                   <div class="model-row">
-                    <select id="model-select" aria-label="Whisper model">
-                      <option value="base.en">Base English (~142 MB)</option>
-                      <option value="small.en">Small English (~466 MB)</option>
-                      <option value="small">Small Multilingual (~466 MB)</option>
-                      <option value="medium.en">Medium English (~1.5 GB)</option>
-                      <option value="medium">Medium Multilingual (~1.5 GB)</option>
-                      <option value="large-v3-turbo">Large v3 Turbo (~1.5 GB)</option>
-                      <option value="large-v3">Large v3 (~2.9 GB)</option>
+                    <select id="model-select" aria-label="Transcription model">
+                      <option value="large-v3-turbo">Whisper Large v3 Turbo · GPU (~1.5 GB)</option>
+                      <option value="parakeet-tdt-0.6b-v2">Parakeet TDT 0.6B v2 · CPU (~600 MB)</option>
+                      <option value="medium.en">Whisper Medium English · low-VRAM fallback (~1.5 GB)</option>
                     </select>
                     <button id="download-btn" class="btn-primary" type="button">Download</button>
                   </div>
@@ -293,10 +289,10 @@
                 Click a shortcut button, then press the new key combo.
               </div>
 
-              <div class="setting-row">
+              <div class="setting-row" id="streaming-captions-row">
                 <div class="setting-label">
                   <label class="label-text" for="streaming-captions">Streaming captions</label>
-                  <span class="label-hint">Run partial transcriptions while you speak and show them in a HUD near the bottom of the screen. Costs extra inference cycles per second.</span>
+                  <span class="label-hint">Run partial transcriptions while you speak and show them in a HUD near the bottom of the screen. Costs extra inference cycles per second. Whisper-only — Parakeet doesn't expose a streaming API yet.</span>
                 </div>
                 <div class="setting-control">
                   <label class="switch">

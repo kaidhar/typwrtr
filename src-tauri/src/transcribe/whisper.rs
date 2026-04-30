@@ -1,28 +1,33 @@
+//! Whisper backend via the `whisper-rs` crate. Long-lived `WhisperContext`
+//! kept in a Mutex so the model loads once and is reused across dictations
+//! and streaming partials. Per-token logprobs are extracted for the
+//! confidence-gated stages downstream.
+
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters};
 
-/// Logs which GPU backend whisper.cpp was compiled against. The Cargo features
-/// on `whisper-rs` are wired in `Cargo.toml` per-target, so we infer the same
-/// way here. whisper.cpp itself prints its actual device pick during model
-/// load (e.g. `metal: device 'Apple M-series'`, `ggml_cuda_init: ...`) — that
-/// log line is the runtime confirmation.
+use super::{TranscribeOptions, TranscribeResult, Transcriber};
+
+/// Logs which GPU backend whisper.cpp was compiled against. The Cargo
+/// features on `whisper-rs` are wired in `Cargo.toml` per-target;
+/// whisper.cpp prints its actual device pick during model load
+/// (e.g. `ggml_cuda_init: found 1 CUDA devices`).
 pub fn log_compiled_backend() {
-    // Mirrors the per-target whisper-rs feature wiring in Cargo.toml. The
-    // ground-truth runtime device pick is whatever whisper.cpp prints during
-    // model load (e.g. `ggml_cuda_init: found N CUDA devices`).
     #[cfg(target_os = "macos")]
     let backend = "Metal";
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(all(not(target_os = "macos"), feature = "cuda"))]
     let backend = "CUDA";
+    #[cfg(all(not(target_os = "macos"), not(feature = "cuda")))]
+    let backend = "CPU";
 
     println!("[typwrtr] Whisper backend: {}", backend);
 }
 
 /// Long-lived whisper model. Loaded once, reused across dictations.
 /// On settings change we reload only when the model path differs.
-pub struct LocalTranscriber {
+pub struct WhisperTranscriber {
     inner: Mutex<Option<Loaded>>,
 }
 
@@ -31,15 +36,26 @@ struct Loaded {
     ctx: Arc<WhisperContext>,
 }
 
-impl LocalTranscriber {
+impl WhisperTranscriber {
     pub fn new() -> Self {
         Self {
             inner: Mutex::new(None),
         }
     }
 
-    /// Ensure the given model is loaded. Reloads if a different model is currently held.
-    pub fn ensure_loaded(&self, model_path: &Path) -> Result<Arc<WhisperContext>, String> {
+    fn cached_ctx(&self) -> Option<Arc<WhisperContext>> {
+        self.inner.lock().unwrap().as_ref().map(|l| l.ctx.clone())
+    }
+}
+
+impl Default for WhisperTranscriber {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Transcriber for WhisperTranscriber {
+    fn ensure_loaded(&self, model_path: &Path) -> Result<(), String> {
         if !model_path.exists() {
             return Err("Whisper model not found. Please download a model first.".to_string());
         }
@@ -47,7 +63,7 @@ impl LocalTranscriber {
         let mut guard = self.inner.lock().unwrap();
         if let Some(loaded) = guard.as_ref() {
             if loaded.path == model_path {
-                return Ok(loaded.ctx.clone());
+                return Ok(());
             }
         }
 
@@ -55,74 +71,34 @@ impl LocalTranscriber {
         println!("[typwrtr] Loading whisper model: {}", path_str);
         let ctx = WhisperContext::new_with_params(path_str, WhisperContextParameters::default())
             .map_err(|e| format!("Failed to load whisper model: {}", e))?;
-        let ctx = Arc::new(ctx);
         *guard = Some(Loaded {
             path: model_path.to_path_buf(),
-            ctx: ctx.clone(),
+            ctx: Arc::new(ctx),
         });
-        Ok(ctx)
+        Ok(())
     }
 
-    /// Transcribe 16kHz mono f32 samples. Runs CPU-bound inference on a blocking thread.
-    pub async fn transcribe(
+    fn transcribe_blocking(
         &self,
-        model_path: &Path,
         samples: Vec<f32>,
         opts: TranscribeOptions,
     ) -> Result<TranscribeResult, String> {
-        let ctx = self.ensure_loaded(model_path)?;
+        let ctx = self
+            .cached_ctx()
+            .ok_or_else(|| "Whisper model not loaded. Call ensure_loaded first.".to_string())?;
+        run_whisper(ctx, samples, opts)
+    }
 
-        tokio::task::spawn_blocking(move || transcribe_blocking(ctx, samples, opts))
-            .await
-            .map_err(|e| format!("Transcription join error: {}", e))?
+    fn supports_streaming(&self) -> bool {
+        true
+    }
+
+    fn supports_initial_prompt(&self) -> bool {
+        true
     }
 }
 
-/// Decoded text plus a confidence proxy. `avg_logprob` is the mean per-token
-/// log-prob across all segments; closer to 0 = more confident. Values around
-/// -0.3 are clean utterances; below -0.7 are usually noisy / hallucinated.
-/// `0.0` means whisper produced no scorable tokens (treat as "no signal",
-/// not "perfect").
-#[derive(Debug, Clone)]
-pub struct TranscribeResult {
-    pub text: String,
-    pub avg_logprob: f32,
-}
-
-/// Knobs for a single transcription. Designed to grow as Phase 2 (vocabulary
-/// biasing) and §3 step 8 (streaming) come online — adding fields here will
-/// not break existing call sites if they go through `TranscribeOptions::default`.
-#[derive(Debug, Clone)]
-pub struct TranscribeOptions {
-    /// ISO-639-1 code, or `"auto"` to let whisper detect.
-    pub language: String,
-    /// Free-form text fed to whisper as the initial prompt — biases decoding
-    /// toward this vocabulary. Empty string means no biasing.
-    pub initial_prompt: String,
-    /// CPU threads. `None` = auto-detect.
-    pub threads: Option<i32>,
-    /// Beam-of-N for `BeamSearch`; `1` = greedy.
-    pub beam_size: i32,
-}
-
-impl Default for TranscribeOptions {
-    fn default() -> Self {
-        Self {
-            language: "en".to_string(),
-            initial_prompt: String::new(),
-            threads: None,
-            // Beam search (size 5, no patience) cuts WER 5–15 % over greedy on
-            // proper nouns and out-of-distribution tokens. CUDA decode of a
-            // 5 s utterance stays under ~300 ms even at this beam.
-            // The streaming-partials path overrides this back to 1 because
-            // per-tick cost matters there; only the final transcription pays
-            // the beam tax.
-            beam_size: 5,
-        }
-    }
-}
-
-fn transcribe_blocking(
+fn run_whisper(
     ctx: Arc<WhisperContext>,
     samples: Vec<f32>,
     opts: TranscribeOptions,
@@ -169,8 +145,6 @@ fn transcribe_blocking(
     // detector more eager to drop confidently-wrong outputs on quiet frames
     // (default 0.6 → 0.3). suppress_nst kills the model's non-speech tokens
     // (the source of `[Music]`, `♪`, and a chunk of canonical hallucinations).
-    // The remaining grammatical hallucinations like "Thank you for watching"
-    // stay user-correctable through the learning loop.
     params.set_no_speech_thold(0.3);
     params.set_suppress_nst(true);
 
@@ -195,10 +169,6 @@ fn transcribe_blocking(
         for j in 0..n_tok {
             if let Some(tok) = seg.get_token(j) {
                 let td = tok.token_data();
-                // Skip special tokens (BEG/EOT/timestamps): their ids sit at
-                // or above the text-token boundary (~50256). Also skip the
-                // sentinel `plog == 0.0` rows whisper emits for unscored
-                // entries — including them biases the mean toward 0.
                 if td.id >= 50256 || td.plog == 0.0 {
                     continue;
                 }
@@ -249,7 +219,7 @@ mod tests {
 
     #[test]
     fn test_ensure_loaded_missing_model() {
-        let tx = LocalTranscriber::new();
+        let tx = WhisperTranscriber::new();
         let err = tx
             .ensure_loaded(&PathBuf::from("/nonexistent/model.bin"))
             .unwrap_err();

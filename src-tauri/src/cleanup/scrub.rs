@@ -123,9 +123,7 @@ pub fn scrub_hallucinations(text: &str) -> String {
             out_lines.push(line.to_string());
             continue;
         }
-        if HALLUCINATION_AC.is_match(trimmed)
-            && full_match(&HALLUCINATION_AC, trimmed)
-        {
+        if HALLUCINATION_AC.is_match(trimmed) && full_match(&HALLUCINATION_AC, trimmed) {
             // Whole line is exactly one hallucination phrase — drop it.
             continue;
         }
@@ -139,7 +137,9 @@ pub fn scrub_hallucinations(text: &str) -> String {
     if text.ends_with('\n') {
         result.push('\n');
     }
-    result.trim_end_matches(|c: char| c == ' ' || c == '\t').to_string()
+    result
+        .trim_end_matches(|c: char| c == ' ' || c == '\t')
+        .to_string()
 }
 
 fn full_match(ac: &AhoCorasick, s: &str) -> bool {
@@ -267,10 +267,7 @@ mod tests {
 
     #[test]
     fn scrub_case_insensitive() {
-        assert_eq!(
-            scrub_hallucinations("THANKS FOR WATCHING."),
-            ""
-        );
+        assert_eq!(scrub_hallucinations("THANKS FOR WATCHING."), "");
     }
 
     #[test]

@@ -8,8 +8,8 @@ use tauri::{Emitter, Listener, Manager, State, WebviewUrl, WebviewWindowBuilder,
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
 
 use typwrtr_lib::audio;
-use typwrtr_lib::context;
 use typwrtr_lib::clipboard::copy;
+use typwrtr_lib::context;
 use typwrtr_lib::db::{
     AppProfileRow, CorrectionRow, Db, DbHealth, RecentTranscription, SnippetRow, VocabularyRow,
 };
@@ -17,7 +17,7 @@ use typwrtr_lib::downloader;
 use typwrtr_lib::learning::apply_correction_pairs;
 use typwrtr_lib::recorder::{Recorder, RecordingState};
 use typwrtr_lib::settings::Settings;
-use typwrtr_lib::transcribe_local::{self, LocalTranscriber};
+use typwrtr_lib::transcribe::{self, ParakeetTranscriber, Transcriber, WhisperTranscriber};
 
 struct AppState {
     recorder: Recorder,
@@ -63,6 +63,15 @@ fn model_storage_dir(settings: &Settings, app_dir: &PathBuf) -> PathBuf {
     }
 }
 
+/// Construct the right `Transcriber` for the given engine name. Centralised
+/// so app init + `save_settings` agree on the dispatch table.
+fn make_transcriber(engine: &str) -> Arc<dyn Transcriber> {
+    match engine {
+        "parakeet" => Arc::new(ParakeetTranscriber::new()) as Arc<dyn Transcriber>,
+        _ => Arc::new(WhisperTranscriber::new()) as Arc<dyn Transcriber>,
+    }
+}
+
 #[tauri::command]
 fn set_hotkey_capture_active(state: State<AppState>, active: bool) {
     *state.hotkey_capture_active.lock().unwrap() = active;
@@ -84,6 +93,30 @@ fn save_settings(
         || settings.push_to_talk_hotkey == settings.fixup_hotkey
     {
         return Err("Toggle, push-to-talk, and fix-up hotkeys must all be different".to_string());
+    }
+
+    // Swap the active engine if the model picked sits in a different
+    // family from the currently-loaded one. The Recorder holds the
+    // transcriber behind a Mutex, so this is a cheap atomic Arc swap;
+    // any in-flight `stop_and_transcribe` either finishes on the old
+    // engine or starts on the new — never half-and-half.
+    let new_engine = settings.engine();
+    let current_engine = {
+        let active = state.recorder.local_transcriber();
+        if active.supports_initial_prompt() {
+            "whisper"
+        } else {
+            "parakeet"
+        }
+    };
+    if new_engine != current_engine {
+        state
+            .recorder
+            .set_transcriber(make_transcriber(new_engine));
+        println!(
+            "[typwrtr] Engine swapped: {} -> {}",
+            current_engine, new_engine
+        );
     }
 
     settings.save(&state.app_dir)?;
@@ -118,8 +151,16 @@ fn resolved_model_dir(state: State<AppState>) -> String {
 fn check_model_downloaded(state: State<AppState>, model_size: String) -> bool {
     let settings = state.settings.lock().unwrap().clone();
     let model_dir = model_storage_dir(&settings, &state.app_dir);
-    let model_file = transcribe_local::model_filename(&model_size);
-    model_dir.join(&model_file).exists()
+    match typwrtr_lib::settings::engine_for_model(&model_size) {
+        "parakeet" => {
+            let dest_dir = model_dir.join(&model_size);
+            transcribe::parakeet::all_files_present(&dest_dir, &model_size)
+        }
+        _ => {
+            let model_file = transcribe::model_filename(&model_size);
+            model_dir.join(&model_file).exists()
+        }
+    }
 }
 
 #[tauri::command]
@@ -130,10 +171,32 @@ async fn download_model(
 ) -> Result<(), String> {
     let settings = state.settings.lock().unwrap().clone();
     let model_dir = model_storage_dir(&settings, &state.app_dir);
-    let url = transcribe_local::model_download_url(&model_size);
-    let model_file = transcribe_local::model_filename(&model_size);
-    let dest = model_dir.join(&model_file);
-    downloader::download_model(app, &url, &dest).await
+    match typwrtr_lib::settings::engine_for_model(&model_size) {
+        "parakeet" => {
+            // Parakeet ships as a directory of ONNX files + vocab; loop the
+            // required-file list and stream each into `<dir>/<filename>`.
+            // The `download-progress` event fires per file; the frontend
+            // already treats it as a single bar reset per call, which is
+            // fine for the UX (each file dominates the previous instantly).
+            let dest_dir = model_dir.join(&model_size);
+            std::fs::create_dir_all(&dest_dir).map_err(|e| e.to_string())?;
+            for (name, url) in transcribe::parakeet::required_files(&model_size) {
+                let dest = dest_dir.join(&name);
+                if dest.exists() {
+                    continue;
+                }
+                println!("[typwrtr] Downloading parakeet file: {}", name);
+                downloader::download_model(app.clone(), &url, &dest).await?;
+            }
+            Ok(())
+        }
+        _ => {
+            let url = transcribe::model_download_url(&model_size);
+            let model_file = transcribe::model_filename(&model_size);
+            let dest = model_dir.join(&model_file);
+            downloader::download_model(app, &url, &dest).await
+        }
+    }
 }
 
 #[tauri::command]
@@ -597,7 +660,7 @@ fn main() {
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .plugin(tauri_plugin_dialog::init())
         .manage(AppState {
-            recorder: Recorder::new(Arc::new(LocalTranscriber::new()), db.clone()),
+            recorder: Recorder::new(make_transcriber(settings.engine()), db.clone()),
             registered_hotkeys: Mutex::new(RegisteredHotkeys::default()),
             hotkey_capture_active: Mutex::new(false),
             settings: Mutex::new(settings),
@@ -820,7 +883,7 @@ fn main() {
                 });
             });
 
-            transcribe_local::log_compiled_backend();
+            transcribe::log_compiled_backend();
 
             // Hygiene log: the prior on-device T5 grammar corrector wrote
             // ~240 MB of model files into <app_dir>/grammar-corrector/. The
@@ -840,7 +903,7 @@ fn main() {
             // Pre-warm the whisper model so the first dictation doesn't pay load cost.
             let prewarm_settings = state.settings.lock().unwrap().clone();
             let model_root = model_storage_dir(&prewarm_settings, &state.app_dir);
-            let model_path = model_root.join(transcribe_local::model_filename(
+            let model_path = model_root.join(transcribe::model_filename(
                 &prewarm_settings.whisper_model,
             ));
             let local = state.recorder.local_transcriber();
